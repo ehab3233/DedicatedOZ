@@ -1,0 +1,373 @@
+"""Request and response models.
+
+Customer-facing shapes deliberately omit CIMC addressing, credential refs and
+raw BMC output. Admin shapes carry them.
+"""
+
+from __future__ import annotations
+
+import uuid
+from datetime import datetime
+
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
+
+from app.enums import ActorType, InstallMethod, JobState, JobType, RaidLevel, ServerState
+
+
+class ORMModel(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+
+# ---------------------------------------------------------------------------
+# Auth
+# ---------------------------------------------------------------------------
+
+
+class LoginRequest(BaseModel):
+    email: EmailStr
+    password: str = Field(min_length=1, max_length=1024)
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    expires_in: int
+    is_admin: bool
+
+
+class CustomerOut(ORMModel):
+    id: uuid.UUID
+    email: str
+    company_name: str | None
+    contact_name: str | None
+    is_admin: bool
+    created_at: datetime
+
+
+class APITokenCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=128)
+    expires_in_days: int | None = Field(default=None, ge=1, le=3650)
+
+
+class APITokenOut(ORMModel):
+    id: uuid.UUID
+    name: str
+    token_prefix: str
+    created_at: datetime
+    last_used_at: datetime | None
+    expires_at: datetime | None
+
+
+class APITokenCreated(APITokenOut):
+    #: Returned once, at creation. Never retrievable again.
+    token: str
+
+
+# ---------------------------------------------------------------------------
+# SSH keys
+# ---------------------------------------------------------------------------
+
+
+class SSHKeyCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=128)
+    public_key: str = Field(min_length=32, max_length=16384)
+
+    @field_validator("public_key")
+    @classmethod
+    def _looks_like_a_key(cls, value: str) -> str:
+        value = value.strip()
+        valid_prefixes = (
+            "ssh-rsa",
+            "ssh-ed25519",
+            "ecdsa-sha2-nistp256",
+            "ecdsa-sha2-nistp384",
+            "ecdsa-sha2-nistp521",
+            "sk-ssh-ed25519@openssh.com",
+            "sk-ecdsa-sha2-nistp256@openssh.com",
+        )
+        if not value.startswith(valid_prefixes):
+            raise ValueError("not an OpenSSH public key")
+        if "\n" in value:
+            raise ValueError("public key must be a single line")
+        return value
+
+
+class SSHKeyOut(ORMModel):
+    id: uuid.UUID
+    name: str
+    public_key: str
+    fingerprint: str
+    created_at: datetime
+
+
+# ---------------------------------------------------------------------------
+# Servers
+# ---------------------------------------------------------------------------
+
+
+class ServerHealthOut(BaseModel):
+    status: str | None
+    checked_at: datetime | None
+    subsystems: dict = Field(default_factory=dict)
+
+
+class ServerOut(ORMModel):
+    """Customer view. No CIMC address, no credential ref."""
+
+    id: uuid.UUID
+    serial: str
+    hostname: str | None
+    model: str
+    state: ServerState
+    cpu_model: str | None
+    cpu_count: int | None
+    cpu_cores_total: int | None
+    ram_gb: int | None
+    datacenter: str | None
+    last_power_state: str | None
+    health_status: str | None
+    health_checked_at: datetime | None
+    created_at: datetime
+
+
+class ServerDetailOut(ServerOut):
+    drives: list[dict] = Field(default_factory=list)
+    nics: list[dict] = Field(default_factory=list)
+    ip_addresses: list[IPAssignmentOut] = Field(default_factory=list)
+    health: ServerHealthOut | None = None
+
+
+class AdminServerOut(ServerDetailOut):
+    cimc_ip: str
+    cimc_credential_ref: str
+    cimc_firmware: str | None
+    bios_version: str | None
+    rack: str | None
+    rack_unit: int | None
+    switch_name: str | None
+    switch_port: str | None
+    customer_vlan: int | None
+    provisioning_mac: str | None
+    last_wiped_at: datetime | None
+    notes: str | None
+    customer_email: str | None = None
+
+
+class ServerCreate(BaseModel):
+    serial: str = Field(min_length=1, max_length=64)
+    cimc_ip: str
+    cimc_credential_ref: str = Field(min_length=1, max_length=255)
+    model: str = "UCSC-C220-M4S"
+    datacenter: str | None = None
+    rack: str | None = None
+    rack_unit: int | None = Field(default=None, ge=1, le=60)
+    switch_name: str | None = None
+    switch_port: str | None = None
+    customer_vlan: int | None = Field(default=None, ge=1, le=4094)
+    provisioning_mac: str | None = None
+    notes: str | None = None
+
+
+class ServerUpdate(BaseModel):
+    hostname: str | None = None
+    datacenter: str | None = None
+    rack: str | None = None
+    rack_unit: int | None = Field(default=None, ge=1, le=60)
+    switch_name: str | None = None
+    switch_port: str | None = None
+    customer_vlan: int | None = Field(default=None, ge=1, le=4094)
+    provisioning_mac: str | None = None
+    cimc_credential_ref: str | None = None
+    notes: str | None = None
+
+
+class ServerStateChange(BaseModel):
+    state: ServerState
+    reason: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Power / provisioning requests
+# ---------------------------------------------------------------------------
+
+
+class PowerRequest(BaseModel):
+    #: on | off | cycle | reset
+    action: str
+
+    @field_validator("action")
+    @classmethod
+    def _known_action(cls, value: str) -> str:
+        if value not in {"on", "off", "cycle", "reset"}:
+            raise ValueError("action must be one of: on, off, cycle, reset")
+        return value
+
+
+class ReinstallRequest(BaseModel):
+    os_template_id: uuid.UUID
+    hostname: str | None = Field(default=None, max_length=255)
+    raid_level: RaidLevel = RaidLevel.RAID1
+    ssh_key_ids: list[uuid.UUID] = Field(default_factory=list)
+    #: Optional; if unset the machine is key-only, which is the safer default.
+    root_password: str | None = Field(default=None, min_length=12, max_length=256)
+    #: Must be sent explicitly. Reinstall destroys everything on the array.
+    confirm_data_loss: bool = False
+
+
+class RescueRequest(BaseModel):
+    #: Rescue always boots to RAM; nothing on disk is touched.
+    ssh_key_ids: list[uuid.UUID] = Field(default_factory=list)
+
+
+class WipeRequest(BaseModel):
+    confirm_data_loss: bool = False
+    #: "secure" uses ATA secure erase / nvme format; "zero" overwrites.
+    method: str = "secure"
+
+
+# ---------------------------------------------------------------------------
+# Jobs
+# ---------------------------------------------------------------------------
+
+
+class JobLogEntryOut(ORMModel):
+    sequence: int
+    timestamp: datetime
+    level: str
+    message: str
+
+
+class AdminJobLogEntryOut(JobLogEntryOut):
+    request: dict | None
+    response: dict | None
+    customer_visible: bool
+
+
+class JobOut(ORMModel):
+    id: uuid.UUID
+    type: JobType
+    state: JobState
+    server_id: uuid.UUID | None
+    progress: int
+    stage: str | None
+    error: str | None
+    requested_by_type: ActorType
+    created_at: datetime
+    started_at: datetime | None
+    finished_at: datetime | None
+
+
+class JobDetailOut(JobOut):
+    log: list[JobLogEntryOut] = Field(default_factory=list)
+    result: dict = Field(default_factory=dict)
+
+
+class AdminJobDetailOut(JobOut):
+    log: list[AdminJobLogEntryOut] = Field(default_factory=list)
+    payload: dict = Field(default_factory=dict)
+    result: dict = Field(default_factory=dict)
+    celery_task_id: str | None
+    attempts: int
+
+
+# ---------------------------------------------------------------------------
+# OS templates
+# ---------------------------------------------------------------------------
+
+
+class OSTemplateOut(ORMModel):
+    id: uuid.UUID
+    slug: str
+    name: str
+    family: str
+    version: str
+    install_method: InstallMethod
+    default_raid_level: RaidLevel
+
+
+class OSTemplateCreate(BaseModel):
+    slug: str = Field(min_length=1, max_length=64)
+    name: str
+    family: str
+    version: str
+    install_method: InstallMethod
+    config_template: str
+    kernel_path: str | None = None
+    initrd_path: str | None = None
+    kernel_args: str | None = None
+    iso_path: str | None = None
+    default_raid_level: RaidLevel = RaidLevel.RAID1
+    is_public: bool = True
+    sort_order: int = 100
+
+
+# ---------------------------------------------------------------------------
+# IPAM
+# ---------------------------------------------------------------------------
+
+
+class IPAssignmentOut(ORMModel):
+    id: uuid.UUID
+    address: str
+    prefix_len: int
+    gateway: str | None = None
+    is_primary: bool
+    rdns: str | None
+
+
+class RDNSUpdate(BaseModel):
+    rdns: str | None = Field(default=None, max_length=255)
+
+
+class IPBlockOut(ORMModel):
+    id: uuid.UUID
+    cidr: str
+    version: int
+    gateway: str | None
+    routing_mode: str
+    vlan: int | None
+    datacenter: str | None
+    is_assignable: bool
+
+
+# ---------------------------------------------------------------------------
+# Installer callbacks
+# ---------------------------------------------------------------------------
+
+
+class InstallerProgress(BaseModel):
+    stage: str = Field(max_length=64)
+    progress: int = Field(ge=0, le=100)
+    message: str | None = Field(default=None, max_length=4000)
+
+
+class InstallerComplete(BaseModel):
+    success: bool
+    message: str | None = Field(default=None, max_length=8000)
+    #: Reported by the wipe rail; a wipe with an empty list does not count.
+    drives_wiped: list[str] = Field(default_factory=list)
+    #: Host key fingerprints, so customers can verify their first SSH login.
+    host_keys: list[str] = Field(default_factory=list)
+    detail: dict = Field(default_factory=dict)
+
+
+# ---------------------------------------------------------------------------
+# Bandwidth
+# ---------------------------------------------------------------------------
+
+
+class BandwidthPoint(BaseModel):
+    timestamp: datetime
+    rx_bps: float
+    tx_bps: float
+
+
+class BandwidthSeries(BaseModel):
+    server_id: uuid.UUID
+    period: str
+    points: list[BandwidthPoint]
+    total_rx_bytes: int
+    total_tx_bytes: int
+
+
+ServerDetailOut.model_rebuild()

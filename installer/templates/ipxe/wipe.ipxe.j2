@@ -1,0 +1,33 @@
+#!ipxe
+# Deprovision wipe for job {{ job.id }}.
+#
+# The M4 has no hardware sanitize API -- CIMC data sanitization arrived in 4.3
+# and only on M5 and newer -- so the erase happens in this ramdisk, per drive,
+# and the result is reported back before the server may return to stock.
+
+set doz-base {{ control_plane_url }}
+set doz-assets {{ boot_asset_base_url }}
+
+echo
+echo === DedicatedOZ secure wipe ===
+echo Server : {{ server.serial }}
+echo THIS DESTROYS ALL DATA ON THIS MACHINE.
+echo
+
+kernel ${doz-assets}/doz-installer/vmlinuz \
+  initrd=initrd.img \
+  doz_url=${doz-base} \
+  doz_mac={{ server.mac }} \
+  doz_sig={{ boot_signature }} \
+  doz_job={{ job.id }} \
+  doz_mode=wipe \
+  console=tty0 console=ttyS0,115200n8 \
+  ip=dhcp rd.neednet=1 || goto failed
+
+initrd ${doz-assets}/doz-installer/initrd.img || goto failed
+boot || goto failed
+
+:failed
+echo Failed to load the wipe image. The server has NOT been wiped.
+sleep 30
+shell

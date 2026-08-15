@@ -1,0 +1,220 @@
+/* Portal styling. Deliberately small: hand-rolled tokens beat pulling in a
+   framework for a dozen screens, and it keeps the bundle honest. */
+
+:root {
+  --bg: #f6f7f9;
+  --surface: #ffffff;
+  --surface-2: #f0f2f5;
+  --border: #d8dce3;
+  --text: #14171c;
+  --text-dim: #5b6472;
+  --accent: #2563eb;
+  --accent-text: #ffffff;
+  --ok: #15803d;
+  --warn: #b45309;
+  --crit: #b91c1c;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  --radius: 8px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0f1216;
+    --surface: #171b21;
+    --surface-2: #1f242c;
+    --border: #2d343e;
+    --text: #e7eaee;
+    --text-dim: #97a1af;
+    --accent: #4b83f0;
+    --ok: #4ade80;
+    --warn: #fbbf24;
+    --crit: #f87171;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+/* --- layout ------------------------------------------------------------- */
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  padding: 0 24px;
+  height: 56px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+
+.topbar .brand { font-weight: 650; letter-spacing: -0.01em; }
+.topbar nav { display: flex; gap: 18px; flex: 1; }
+.topbar nav a { color: var(--text-dim); font-size: 14px; }
+.topbar nav a.active { color: var(--text); font-weight: 550; }
+
+.page { max-width: 1080px; margin: 0 auto; padding: 28px 24px 64px; }
+.page h1 { font-size: 22px; margin: 0 0 4px; letter-spacing: -0.01em; }
+.page h2 { font-size: 16px; margin: 28px 0 10px; }
+.subtle { color: var(--text-dim); font-size: 14px; }
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 18px;
+  margin-bottom: 16px;
+}
+
+.grid { display: grid; gap: 16px; }
+.grid.cols-2 { grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }
+.grid.cols-4 { grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); }
+.row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.spread { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+
+/* --- controls ----------------------------------------------------------- */
+
+button, .button {
+  font: inherit;
+  font-size: 14px;
+  padding: 7px 14px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text);
+  cursor: pointer;
+}
+button:hover:not(:disabled) { border-color: var(--text-dim); }
+button:disabled { opacity: 0.45; cursor: not-allowed; }
+button.primary { background: var(--accent); color: var(--accent-text); border-color: transparent; }
+button.danger { color: var(--crit); }
+
+input, select, textarea {
+  font: inherit;
+  font-size: 14px;
+  padding: 7px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  width: 100%;
+}
+textarea { font-family: var(--mono); font-size: 12.5px; min-height: 90px; resize: vertical; }
+label { display: block; font-size: 13px; color: var(--text-dim); margin-bottom: 4px; }
+.field { margin-bottom: 14px; }
+
+/* --- tables ------------------------------------------------------------- */
+
+table { width: 100%; border-collapse: collapse; font-size: 14px; }
+th {
+  text-align: left;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+  font-weight: 600;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+}
+td { padding: 10px; border-bottom: 1px solid var(--border); }
+tr:last-child td { border-bottom: none; }
+.table-scroll { overflow-x: auto; }
+
+/* --- status ------------------------------------------------------------- */
+
+.pill {
+  display: inline-block;
+  font-size: 12px;
+  font-weight: 550;
+  padding: 2px 9px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+}
+.pill.ok, .pill.active, .pill.succeeded { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 40%, transparent); }
+.pill.warning, .pill.provisioning, .pill.running, .pill.queued, .pill.rescue, .pill.wiping { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 40%, transparent); }
+.pill.critical, .pill.failed, .pill.suspended, .pill.rma { color: var(--crit); border-color: color-mix(in srgb, var(--crit) 40%, transparent); }
+
+.progress {
+  height: 6px;
+  background: var(--surface-2);
+  border-radius: 999px;
+  overflow: hidden;
+}
+.progress > div { height: 100%; background: var(--accent); transition: width 0.4s ease; }
+
+.banner {
+  padding: 11px 14px;
+  border-radius: 6px;
+  font-size: 14px;
+  margin-bottom: 16px;
+  border: 1px solid;
+}
+.banner.error { color: var(--crit); border-color: color-mix(in srgb, var(--crit) 40%, transparent); background: color-mix(in srgb, var(--crit) 8%, transparent); }
+.banner.info { color: var(--text-dim); border-color: var(--border); background: var(--surface-2); }
+
+/* --- log / console ------------------------------------------------------ */
+
+.log {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  background: #0c0f13;
+  color: #d7dce3;
+  border-radius: var(--radius);
+  padding: 14px;
+  max-height: 460px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.log .ts { color: #6b7684; }
+.log .error { color: #f87171; }
+.log .warning { color: #fbbf24; }
+
+.mono { font-family: var(--mono); font-size: 13px; }
+
+/* --- modal -------------------------------------------------------------- */
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  z-index: 50;
+}
+.modal {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 22px;
+  width: 100%;
+  max-width: 520px;
+  max-height: 90vh;
+  overflow: auto;
+}
+.modal h3 { margin: 0 0 14px; font-size: 17px; }
+
+/* --- misc --------------------------------------------------------------- */
+
+.stat { padding: 14px 16px; }
+.stat .value { font-size: 26px; font-weight: 600; letter-spacing: -0.02em; }
+.stat .label { font-size: 12.5px; color: var(--text-dim); }
+
+.empty { padding: 40px 20px; text-align: center; color: var(--text-dim); }
+
+.login-wrap { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 20px; }
+.login-card { width: 100%; max-width: 380px; }

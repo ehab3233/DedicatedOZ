@@ -1,0 +1,89 @@
+# Development stack. Production splits this: the API sits on the control
+# plane, the workers sit on a host with a route to the OOB VLAN, and only the
+# workers ever hold BMC credentials.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: doz
+      POSTGRES_PASSWORD: doz
+      POSTGRES_DB: doz
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U doz"]
+      interval: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redisdata:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    env_file: .env
+    environment:
+      DOZ_DATABASE_URL: postgresql+psycopg://doz:doz@postgres:5432/doz
+      DOZ_REDIS_URL: redis://redis:6379/0
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+
+  worker:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    command:
+      ["celery", "-A", "app.workers.celery_app.celery_app", "worker",
+       "--loglevel=info", "--concurrency=4", "-Q", "provision,power,poll"]
+    env_file: .env
+    environment:
+      DOZ_DATABASE_URL: postgresql+psycopg://doz:doz@postgres:5432/doz
+      DOZ_REDIS_URL: redis://redis:6379/0
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    # In production this is the only service attached to the OOB VLAN:
+    # networks: [control, oob]
+
+  beat:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    command:
+      ["celery", "-A", "app.workers.celery_app.celery_app", "beat", "--loglevel=info"]
+    env_file: .env
+    environment:
+      DOZ_DATABASE_URL: postgresql+psycopg://doz:doz@postgres:5432/doz
+      DOZ_REDIS_URL: redis://redis:6379/0
+    depends_on:
+      redis: { condition: service_healthy }
+
+  # Serves kernels, initrds and ISOs to machines being provisioned. Plain HTTP
+  # on purpose: the CIMC's vMedia will not follow redirects and will not
+  # validate a certificate it has never heard of.
+  boot-assets:
+    image: nginx:alpine
+    volumes:
+      - ./installer/assets:/usr/share/nginx/html:ro
+    ports:
+      - "8080:80"
+
+volumes:
+  pgdata:
+  redisdata:

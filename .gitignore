@@ -1,0 +1,24 @@
+.env
+*.pyc
+__pycache__/
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Boot artifacts: kernels, initrds and ISOs. Large, and rebuilt from
+# installer/build-ramdisk.sh rather than tracked. The directory itself is kept.
+installer/assets/*
+!installer/assets/.gitkeep
+
+.DS_Store
+*.swp
+.idea/
+.vscode/

@@ -1,0 +1,416 @@
+#!/bin/sh
+# DedicatedOZ ramdisk provisioning script
+# Rendered for {{ server.serial }} / job {{ job.id }} / mode {{ job.type }}
+#
+# Runs inside the installer ramdisk. Three modes share this script because
+# they share the first two thirds of their work:
+#
+#   install : wipe -> build RAID -> kexec into the distro installer
+#   rescue  : bring up SSH with the customer's keys, touch nothing
+#   wipe    : erase every drive and prove it, then report
+#
+# POSIX sh, not bash: the ramdisk is BusyBox-based.
+
+set -eu
+
+CONTROL_PLANE="{{ control_plane_url }}"
+JOB_ID="{{ job.id }}"
+CALLBACK_TOKEN="{{ job.callback_token }}"
+MODE="{{ job.type }}"
+SERIAL="{{ server.serial }}"
+HOSTNAME="{{ server.hostname }}"
+RAID_LEVEL="{{ raid.level }}"
+STORCLI="${STORCLI:-/opt/MegaRAID/storcli/storcli64}"
+
+log() {
+    echo "[doz] $*" | tee /dev/console
+}
+
+# Progress and completion both go to the control plane. Failures to report are
+# logged but never fatal on their own: a machine that finished installing but
+# could not phone home is recoverable, one that halted mid-install is not.
+report() {
+    stage="$1"
+    percent="$2"
+    message="${3:-}"
+    log "$stage ($percent%)"
+    curl -sf -m 15 -X POST \
+        -H "Authorization: Bearer $CALLBACK_TOKEN" \
+        -H "Content-Type: application/json" \
+        -d "{\"stage\":\"$stage\",\"progress\":$percent,\"message\":\"$message\"}" \
+        "$CONTROL_PLANE/boot/callback/$JOB_ID/progress" >/dev/null 2>&1 \
+        || log "warning: progress callback failed (continuing)"
+}
+
+complete() {
+    success="$1"
+    message="$2"
+    drives_json="${3:-[]}"
+    host_keys_json="${4:-[]}"
+    log "reporting completion: success=$success $message"
+    # Completion is the one callback worth retrying: the worker is blocked on
+    # it, and without it the job fails on timeout after everything went right.
+    i=1
+    while [ "$i" -le 5 ]; do
+        if curl -sf -m 30 -X POST \
+            -H "Authorization: Bearer $CALLBACK_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{\"success\":$success,\"message\":\"$message\",\"drives_wiped\":$drives_json,\"host_keys\":$host_keys_json}" \
+            "$CONTROL_PLANE/boot/callback/$JOB_ID/complete" >/dev/null 2>&1; then
+            return 0
+        fi
+        log "completion callback attempt $i failed; retrying"
+        sleep $((i * 5))
+        i=$((i + 1))
+    done
+    log "ERROR: could not reach the control plane to report completion"
+    return 1
+}
+
+# Any unhandled failure reports itself before the shell exits, so a dead
+# install shows up in the portal as an error rather than as a 45 minute wait.
+on_error() {
+    code=$?
+    [ "$code" -eq 0 ] && exit 0
+    complete false "provisioning script failed at line ${1:-?} with exit code $code" || true
+    log "halting for inspection -- serial console is still attached"
+    # Stay up. A machine that reboots on failure destroys the evidence.
+    sleep infinity
+}
+trap 'on_error $LINENO' EXIT
+
+# ---------------------------------------------------------------------------
+# Storage
+# ---------------------------------------------------------------------------
+
+controller_present() {
+    [ -x "$STORCLI" ] && "$STORCLI" /c0 show nolog >/dev/null 2>&1
+}
+
+# Physical drive slots as enclosure:slot, one per line.
+list_physical_drives() {
+    "$STORCLI" /c0/eall/sall show nolog 2>/dev/null \
+        | awk '/^[0-9]+:[0-9]+/ { print $1 }'
+}
+
+destroy_existing_arrays() {
+    log "deleting existing virtual drives"
+    # `force` is required: the controller refuses to drop a VD that holds a
+    # filesystem, which is precisely the one we are here to remove.
+    "$STORCLI" /c0/vall delete force nolog >/dev/null 2>&1 || \
+        log "no virtual drives to delete"
+    # Foreign configuration is left behind by disks moved between chassis and
+    # will silently block array creation.
+    "$STORCLI" /c0/fall delete nolog >/dev/null 2>&1 || true
+    "$STORCLI" /c0/eall/sall set good force nolog >/dev/null 2>&1 || true
+}
+
+build_array() {
+    level="$1"
+    drives=$(list_physical_drives | tr '\n' ',' | sed 's/,$//')
+    count=$(list_physical_drives | wc -l)
+
+    if [ -z "$drives" ]; then
+        log "ERROR: no physical drives visible to the controller"
+        return 1
+    fi
+    log "controller reports $count drives: $drives"
+
+    case "$level" in
+        none)
+            log "configuring JBOD passthrough"
+            "$STORCLI" /c0 set jbod=on nolog >/dev/null 2>&1 || \
+                log "controller does not support JBOD; leaving drives unconfigured"
+            return 0
+            ;;
+        raid0)  type=raid0;  min=1 ;;
+        raid1)  type=raid1;  min=2 ;;
+        raid5)  type=raid5;  min=3 ;;
+        raid6)  type=raid6;  min=4 ;;
+        raid10) type=raid10; min=4 ;;
+        *)
+            log "ERROR: unknown RAID level $level"
+            return 1
+            ;;
+    esac
+
+    if [ "$count" -lt "$min" ]; then
+        log "ERROR: $level needs at least $min drives, found $count"
+        return 1
+    fi
+
+    # RAID1 across more than two drives is not what anyone means by RAID1;
+    # take the first two and leave the rest unconfigured rather than silently
+    # building a mirror with four members.
+    if [ "$type" = "raid1" ] && [ "$count" -gt 2 ]; then
+        drives=$(list_physical_drives | head -n 2 | tr '\n' ',' | sed 's/,$//')
+        log "using first two drives for RAID1: $drives"
+    fi
+    if [ "$type" = "raid10" ]; then
+        # RAID10 needs an even member count.
+        if [ $((count % 2)) -ne 0 ]; then
+            count=$((count - 1))
+            drives=$(list_physical_drives | head -n "$count" | tr '\n' ',' | sed 's/,$//')
+            log "odd drive count; using $count drives for RAID10"
+        fi
+    fi
+
+    log "creating $type on $drives"
+    "$STORCLI" /c0 add vd type="$type" drives="$drives" wb ra direct nolog
+
+    # Without an explicit boot drive the controller may pick a different VD
+    # after the next reboot, and the machine comes up in the BIOS instead.
+    "$STORCLI" /c0 /v0 set bootdrive=on nolog >/dev/null 2>&1 || \
+        "$STORCLI" /c0 set bootdrive=vd:0 nolog >/dev/null 2>&1 || \
+        log "warning: could not set boot drive explicitly"
+
+    # The VD appears as a block device asynchronously.
+    i=0
+    while [ "$i" -lt 30 ]; do
+        [ -b /dev/sda ] && break
+        sleep 2
+        i=$((i + 1))
+    done
+    [ -b /dev/sda ] || { log "ERROR: no block device appeared after array creation"; return 1; }
+    log "array ready"
+}
+
+# Block devices that are real disks, excluding the ramdisk's own media.
+list_block_devices() {
+    for dev in /sys/block/*; do
+        name=$(basename "$dev")
+        case "$name" in
+            loop*|ram*|sr*|fd*|dm-*|md*) continue ;;
+        esac
+        # Skip removable media -- that is the USB stick someone left in.
+        [ "$(cat "$dev/removable" 2>/dev/null || echo 0)" = "1" ] && continue
+        echo "/dev/$name"
+    done
+}
+
+wipe_device() {
+    dev="$1"
+    log "wiping $dev"
+
+    case "$dev" in
+        /dev/nvme*)
+            # Fastest and most complete: the controller drops the encryption
+            # key rather than overwriting.
+            if nvme format "$dev" --ses=1 --force >/dev/null 2>&1; then
+                log "$dev: nvme format (secure erase) ok"
+                return 0
+            fi
+            log "$dev: nvme secure erase unsupported, falling back"
+            ;;
+        *)
+            # ATA secure erase, if the drive is not frozen. Drives behind the
+            # RAID controller are usually frozen at power-on, which is why the
+            # array is dropped to JBOD before this runs.
+            if hdparm -I "$dev" 2>/dev/null | grep -q "not.*frozen"; then
+                if hdparm --user-master u --security-set-pass doz "$dev" >/dev/null 2>&1 \
+                   && hdparm --user-master u --security-erase doz "$dev" >/dev/null 2>&1; then
+                    log "$dev: ATA secure erase ok"
+                    return 0
+                fi
+                log "$dev: ATA secure erase failed, falling back"
+            else
+                log "$dev: security frozen, falling back"
+            fi
+            # SCSI/SAS drives take sg_format instead.
+            if sg_format --format --fmtpinfo=0 "$dev" >/dev/null 2>&1; then
+                log "$dev: sg_format ok"
+                return 0
+            fi
+            ;;
+    esac
+
+    # Last resort: overwrite. Slow, but it is the one thing that always works.
+    log "$dev: overwriting with zeroes (this takes a while)"
+    dd if=/dev/zero of="$dev" bs=4M status=none conv=fsync 2>/dev/null || true
+    # dd stops at end-of-device with an error; confirm the front of the disk is
+    # actually gone rather than trusting the exit code.
+    if dd if="$dev" bs=1M count=16 2>/dev/null | tr -d '\0' | head -c1 | grep -q .; then
+        log "ERROR: $dev still has non-zero data after overwrite"
+        return 1
+    fi
+    log "$dev: overwrite verified"
+}
+
+quick_wipe_signatures() {
+    # Enough to stop the OS installer tripping over an old filesystem. The
+    # full erase is a separate, much slower mode.
+    for dev in $(list_block_devices); do
+        log "clearing partition table on $dev"
+        wipefs -a "$dev" >/dev/null 2>&1 || true
+        dd if=/dev/zero of="$dev" bs=1M count=16 status=none 2>/dev/null || true
+        # GPT keeps a backup header at the end of the device.
+        size=$(blockdev --getsz "$dev" 2>/dev/null || echo 0)
+        if [ "$size" -gt 32768 ]; then
+            dd if=/dev/zero of="$dev" bs=512 count=2048 \
+                seek=$((size - 2048)) status=none 2>/dev/null || true
+        fi
+    done
+}
+
+# ---------------------------------------------------------------------------
+# Modes
+# ---------------------------------------------------------------------------
+
+setup_ssh() {
+    mkdir -p /root/.ssh
+    chmod 700 /root/.ssh
+    : > /root/.ssh/authorized_keys
+{% for key in ssh_keys %}
+    echo '{{ key }}' >> /root/.ssh/authorized_keys
+{% endfor %}
+    chmod 600 /root/.ssh/authorized_keys
+
+    ssh-keygen -A >/dev/null 2>&1 || true
+    /usr/sbin/sshd -D &
+    log "sshd started"
+}
+
+host_key_fingerprints() {
+    # JSON array of fingerprints so the customer can verify their first login
+    # instead of blindly accepting whatever answers.
+    first=1
+    printf '['
+    for key in /etc/ssh/ssh_host_*_key.pub; do
+        [ -f "$key" ] || continue
+        fp=$(ssh-keygen -lf "$key" 2>/dev/null | awk '{print $2}')
+        [ -n "$fp" ] || continue
+        [ "$first" -eq 1 ] || printf ','
+        printf '"%s"' "$fp"
+        first=0
+    done
+    printf ']'
+}
+
+do_rescue() {
+    report "starting rescue environment" 40 "booting to RAM, disks untouched"
+    setup_ssh
+    report "rescue environment up" 90 "ssh root@this-server using your key"
+    complete true "rescue environment ready" "[]" "$(host_key_fingerprints)"
+    trap - EXIT
+    log "rescue mode active. Sleeping forever; reboot from the portal to exit."
+    sleep infinity
+}
+
+do_wipe() {
+    report "preparing disks for erase" 20 "dropping RAID configuration"
+    if controller_present; then
+        destroy_existing_arrays
+        # The drives have to be individually addressable before any of the
+        # erase methods can reach them.
+        "$STORCLI" /c0 set jbod=on nolog >/dev/null 2>&1 || \
+            log "controller will not enter JBOD; erase falls back to overwrite"
+        sleep 10
+    fi
+
+    wiped=""
+    failed=""
+    total=$(list_block_devices | wc -l)
+    n=0
+    for dev in $(list_block_devices); do
+        n=$((n + 1))
+        pct=$((20 + (60 * n / (total > 0 ? total : 1))))
+        report "erasing $dev" "$pct" "drive $n of $total"
+        if wipe_device "$dev"; then
+            serial=$(udevadm info --query=property --name="$dev" 2>/dev/null \
+                | sed -n 's/^ID_SERIAL_SHORT=//p' | head -n1)
+            wiped="$wiped\"$dev${serial:+ ($serial)}\","
+        else
+            failed="$failed $dev"
+        fi
+    done
+
+    drives_json="[$(echo "$wiped" | sed 's/,$//')]"
+    if [ -n "$failed" ]; then
+        complete false "failed to erase:$failed" "$drives_json"
+        trap - EXIT
+        log "halting: some drives could not be erased"
+        sleep infinity
+    fi
+
+    report "erase complete" 95 "$n drives erased"
+    complete true "$n drives erased" "$drives_json"
+    trap - EXIT
+    log "wipe finished; the control plane will power this server down"
+    sleep infinity
+}
+
+do_install() {
+    report "preparing storage" 25 "clearing existing configuration"
+    if controller_present; then
+        destroy_existing_arrays
+        build_array "$RAID_LEVEL"
+    else
+        log "no RAID controller found; installing to bare disks"
+    fi
+
+    report "clearing old filesystems" 35 ""
+    quick_wipe_signatures
+
+    report "loading OS installer" 45 "{{ os.name if os else 'target OS' }}"
+    install_os
+}
+
+install_os() {
+{% if os %}
+    ANSWER_URL="{{ control_plane_url }}/boot/answer/{{ server.mac }}?sig={{ boot_signature }}"
+
+    log "fetching installer kernel and initrd"
+    curl -sf -o /tmp/vmlinuz "{{ os.kernel_url }}"
+    curl -sf -o /tmp/initrd.img "{{ os.initrd_url }}"
+
+    # Hand off to the distribution's own installer. It is far better at
+    # bootloader placement and driver selection than anything we would write,
+    # and it is what the answer file formats expect.
+{% if os.install_method == 'autoinstall' %}
+    KARGS="autoinstall ds=nocloud-net;s=$ANSWER_URL"
+{% elif os.install_method == 'kickstart' %}
+    KARGS="inst.ks=$ANSWER_URL inst.text"
+{% elif os.install_method == 'preseed' %}
+    KARGS="auto=true priority=critical url=$ANSWER_URL"
+{% else %}
+    KARGS=""
+{% endif %}
+
+    log "kexec into the {{ os.name }} installer"
+    report "running OS installer" 55 "the machine will not respond to SSH until this finishes"
+
+    kexec -l /tmp/vmlinuz \
+        --initrd=/tmp/initrd.img \
+        --command-line="$KARGS {{ os.kernel_args }} console=tty0 console=ttyS0,115200n8 ip=dhcp"
+
+    # From here the OS installer owns the machine and reports completion from
+    # its own post-install hook. This process is about to cease to exist, so
+    # the exit trap must not fire on the way out.
+    trap - EXIT
+    sync
+    kexec -e
+{% else %}
+    complete false "job has no OS template attached"
+    trap - EXIT
+    sleep infinity
+{% endif %}
+}
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+log "DedicatedOZ installer starting: serial=$SERIAL mode=$MODE job=$JOB_ID"
+report "installer booted" 25 "ramdisk is up on $SERIAL"
+
+case "$MODE" in
+    rescue) do_rescue ;;
+    wipe)   do_wipe ;;
+    install) do_install ;;
+    *)
+        log "ERROR: unknown mode $MODE"
+        complete false "unknown provisioning mode $MODE"
+        trap - EXIT
+        sleep infinity
+        ;;
+esac

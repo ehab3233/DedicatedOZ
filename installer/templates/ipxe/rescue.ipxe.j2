@@ -1,0 +1,33 @@
+#!ipxe
+# Rescue mode for job {{ job.id }}.
+#
+# Same rail as install, pointed at the same ramdisk in a different mode. The
+# ramdisk boots to RAM, brings up SSH with the customer's keys, and stops
+# there. Nothing on disk is touched -- that is the entire point.
+
+set doz-base {{ control_plane_url }}
+set doz-assets {{ boot_asset_base_url }}
+
+echo
+echo === DedicatedOZ rescue mode ===
+echo Server : {{ server.serial }}
+echo Disks will NOT be modified.
+echo
+
+kernel ${doz-assets}/doz-installer/vmlinuz \
+  initrd=initrd.img \
+  doz_url=${doz-base} \
+  doz_mac={{ server.mac }} \
+  doz_sig={{ boot_signature }} \
+  doz_job={{ job.id }} \
+  doz_mode=rescue \
+  console=tty0 console=ttyS0,115200n8 \
+  ip=dhcp rd.neednet=1 || goto failed
+
+initrd ${doz-assets}/doz-installer/initrd.img || goto failed
+boot || goto failed
+
+:failed
+echo Failed to load the rescue image. Check ${doz-assets} from the boot VLAN.
+sleep 30
+shell

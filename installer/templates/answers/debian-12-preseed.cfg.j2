@@ -1,0 +1,87 @@
+### Debian preseed for {{ server.serial }} / job {{ job.id }}
+### Served per MAC by the control plane.
+
+d-i debian-installer/locale string en_US.UTF-8
+d-i keyboard-configuration/xkb-keymap select us
+
+### Network
+### The RAID array and the addressing are both decided before this point; the
+### installer is told, not asked.
+d-i netcfg/choose_interface select auto
+d-i netcfg/get_hostname string {{ server.hostname }}
+d-i netcfg/get_domain string local
+d-i netcfg/hostname string {{ server.hostname }}
+{% if network.configured %}
+d-i netcfg/disable_autoconfig boolean true
+d-i netcfg/get_ipaddress string {{ network.address }}
+d-i netcfg/get_netmask string {{ network.netmask }}
+{% if network.gateway %}
+d-i netcfg/get_gateway string {{ network.gateway }}
+{% endif %}
+d-i netcfg/get_nameservers string {{ network.dns | join(' ') }}
+d-i netcfg/confirm_static boolean true
+{% endif %}
+
+### Mirror
+d-i mirror/country string manual
+d-i mirror/http/hostname string deb.debian.org
+d-i mirror/http/directory string /debian
+d-i mirror/http/proxy string
+
+### Accounts
+### Root is key-only unless a password was explicitly requested.
+d-i passwd/root-login boolean true
+{% if root_password_hash %}
+d-i passwd/root-password-crypted password {{ root_password_hash }}
+{% else %}
+d-i passwd/root-password-crypted password !
+{% endif %}
+d-i passwd/make-user boolean false
+
+### Clock
+d-i clock-setup/utc boolean true
+d-i time/zone string UTC
+d-i clock-setup/ntp boolean true
+
+### Partitioning
+### /dev/sda is the virtual drive the ramdisk just created.
+d-i partman-auto/disk string /dev/sda
+d-i partman-auto/method string regular
+d-i partman-auto/choose_recipe select atomic
+d-i partman-partitioning/confirm_write_new_label boolean true
+d-i partman/choose_partition select finish
+d-i partman/confirm boolean true
+d-i partman/confirm_nooverwrite boolean true
+d-i partman-efi/non_efi_system boolean true
+
+### Packages
+tasksel tasksel/first multiselect standard, ssh-server
+d-i pkgsel/include string openssh-server curl ca-certificates
+d-i pkgsel/upgrade select safe-upgrade
+popularity-contest popularity-contest/participate boolean false
+
+### Bootloader
+d-i grub-installer/only_debian boolean true
+d-i grub-installer/bootdev string /dev/sda
+
+d-i finish-install/reboot_in_progress note
+
+### Post-install
+### Runs in the installer, with the target mounted at /target.
+d-i preseed/late_command string \
+    mkdir -p /target/root/.ssh; \
+    chmod 700 /target/root/.ssh; \
+{% for key in ssh_keys %}
+    echo '{{ key }}' >> /target/root/.ssh/authorized_keys; \
+{% endfor %}
+    chmod 600 /target/root/.ssh/authorized_keys || true; \
+    sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin prohibit-password/' /target/etc/ssh/sshd_config; \
+    for i in 1 2 3 4 5 6 7 8 9 10; do \
+        in-target curl -sf -m 20 -X POST \
+            -H "Authorization: Bearer {{ job.callback_token }}" \
+            -H "Content-Type: application/json" \
+            -d '{"success":true,"message":"Debian {{ os.version }} installed"}' \
+            "{{ control_plane_url }}/boot/callback/{{ job.id }}/complete" && break; \
+        sleep 10; \
+    done; \
+    true

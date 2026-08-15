@@ -1,0 +1,85 @@
+#cloud-config
+# Ubuntu autoinstall for {{ server.serial }} / job {{ job.id }}
+#
+# Served per MAC by the control plane. The RAID array already exists by the
+# time this runs -- the ramdisk built it -- so storage config just consumes
+# /dev/sda as a single device.
+autoinstall:
+  version: 1
+
+  locale: en_US.UTF-8
+  keyboard:
+    layout: us
+
+  identity:
+    hostname: {{ server.hostname }}
+    username: doz-setup
+    # Placeholder account. It is locked in late-commands; the machine is
+    # reachable by the customer's SSH keys as root, not through this.
+    password: "!"
+
+  ssh:
+    install-server: true
+    allow-pw: {{ 'true' if root_password_hash else 'false' }}
+    authorized-keys:
+{% for key in ssh_keys %}
+      - "{{ key }}"
+{% else %}
+      []
+{% endfor %}
+
+  storage:
+    layout:
+      name: direct
+      match:
+        path: /dev/sda
+
+{% if network.configured %}
+  network:
+    version: 2
+    ethernets:
+      primary:
+        match:
+          macaddress: "{{ server.mac }}"
+        set-name: eth0
+        addresses:
+          - {{ network.cidr }}
+{% if network.gateway %}
+        routes:
+          - to: default
+            via: {{ network.gateway }}
+{% endif %}
+        nameservers:
+          addresses: [{{ network.dns | join(', ') }}]
+{% endif %}
+
+  packages:
+    - openssh-server
+    - curl
+    - ca-certificates
+
+  late-commands:
+    # Root logs in by key. The setup account exists only because autoinstall
+    # insists on an identity block.
+    - usermod -L doz-setup || true
+    - mkdir -p /target/root/.ssh
+    - chmod 700 /target/root/.ssh
+{% for key in ssh_keys %}
+    - echo '{{ key }}' >> /target/root/.ssh/authorized_keys
+{% endfor %}
+    - chmod 600 /target/root/.ssh/authorized_keys || true
+    - sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin prohibit-password/' /target/etc/ssh/sshd_config
+{% if root_password_hash %}
+    - usermod -p '{{ root_password_hash }}' root --root /target
+{% endif %}
+    # Report success from inside the installer, before the reboot. Ten tries
+    # over a couple of minutes: the network comes up before this runs, but the
+    # gateway may not have learned the new address yet.
+    - >
+      curlretry() { for i in 1 2 3 4 5 6 7 8 9 10; do
+      curl -sf -m 20 -X POST
+      -H "Authorization: Bearer {{ job.callback_token }}"
+      -H "Content-Type: application/json"
+      -d "{\"success\":true,\"message\":\"Ubuntu {{ os.version }} installed\",\"host_keys\":[]}"
+      "{{ control_plane_url }}/boot/callback/{{ job.id }}/complete" && return 0;
+      sleep 10; done; return 1; }; curlretry || true

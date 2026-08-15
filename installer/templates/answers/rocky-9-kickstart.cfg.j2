@@ -1,0 +1,85 @@
+### Rocky Linux kickstart for {{ server.serial }} / job {{ job.id }}
+### Served per MAC by the control plane.
+
+text
+skipx
+eula --agreed
+firstboot --disable
+reboot
+
+lang en_US.UTF-8
+keyboard us
+timezone UTC --utc
+
+### Network
+### The ramdisk has already built the array; addressing is fixed here so the
+### machine comes up on the address the portal shows.
+{% if network.configured %}
+network --bootproto=static --device={{ server.mac }} --ip={{ network.address }} \
+        --netmask={{ network.netmask }}{% if network.gateway %} --gateway={{ network.gateway }}{% endif %} \
+        --nameserver={{ network.dns | join(',') }} --hostname={{ server.hostname }} --activate
+{% else %}
+network --bootproto=dhcp --device={{ server.mac }} --hostname={{ server.hostname }} --activate
+{% endif %}
+
+### Accounts
+{% if root_password_hash %}
+rootpw --iscrypted {{ root_password_hash }}
+{% else %}
+rootpw --lock
+{% endif %}
+
+sshkey --username=root "{{ ssh_keys[0] if ssh_keys else '' }}"
+
+### Storage
+### /dev/sda is the virtual drive created by the ramdisk. `clearpart --all`
+### is safe here and deliberate: the array was built seconds ago.
+ignoredisk --only-use=sda
+clearpart --all --initlabel --drives=sda
+bootloader --location=mbr --boot-drive=sda
+autopart --type=lvm --nohome
+
+### Packages
+%packages
+@^minimal-environment
+openssh-server
+curl
+chrony
+-iwl*firmware
+%end
+
+### Post-install
+%post --log=/root/doz-post.log
+mkdir -p /root/.ssh
+chmod 700 /root/.ssh
+{% for key in ssh_keys %}
+echo '{{ key }}' >> /root/.ssh/authorized_keys
+{% endfor %}
+chmod 600 /root/.ssh/authorized_keys
+restorecon -R /root/.ssh || true
+
+sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config
+systemctl enable sshd
+
+# Report success. %post runs chrooted with the network up, so this reaches the
+# control plane before the machine reboots into the installed system.
+for i in 1 2 3 4 5 6 7 8 9 10; do
+    if curl -sf -m 20 -X POST \
+        -H "Authorization: Bearer {{ job.callback_token }}" \
+        -H "Content-Type: application/json" \
+        -d '{"success":true,"message":"Rocky Linux {{ os.version }} installed"}' \
+        "{{ control_plane_url }}/boot/callback/{{ job.id }}/complete"; then
+        break
+    fi
+    sleep 10
+done
+%end
+
+### If the install itself fails, say so rather than letting the job time out.
+%onerror
+curl -sf -m 20 -X POST \
+    -H "Authorization: Bearer {{ job.callback_token }}" \
+    -H "Content-Type: application/json" \
+    -d '{"success":false,"message":"kickstart failed; see the serial console"}' \
+    "{{ control_plane_url }}/boot/callback/{{ job.id }}/complete" || true
+%end

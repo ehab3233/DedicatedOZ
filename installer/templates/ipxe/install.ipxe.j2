@@ -1,0 +1,41 @@
+#!ipxe
+# Rendered per MAC by the control plane for job {{ job.id }}.
+#
+# This boots the DedicatedOZ installer ramdisk, not the distribution's own
+# installer. The ramdisk wipes the array and builds RAID with StorCLI first,
+# then kexecs into the distribution installer with its answer file. Doing the
+# disk work up front is what makes reinstall repeatable: the OS installer is
+# handed a clean, known-good array every time.
+
+set doz-assets {{ boot_asset_base_url }}
+
+echo
+echo === DedicatedOZ provisioning ===
+echo Server : {{ server.serial }} ({{ server.model }})
+echo Target : {{ os.name }} {{ os.version }}
+echo RAID   : {{ raid.level }}
+echo Job    : {{ job.id }}
+echo
+
+# console=ttyS0,115200 mirrors everything to serial so the whole install is
+# visible in the SOL console when it goes wrong.
+kernel ${doz-assets}/doz-installer/vmlinuz \
+  initrd=initrd.img \
+  doz_url={{ control_plane_url }} \
+  doz_mac={{ server.mac }} \
+  doz_sig={{ boot_signature }} \
+  doz_job={{ job.id }} \
+  doz_mode=install \
+  console=tty0 console=ttyS0,115200n8 \
+  ip=dhcp rd.neednet=1 || goto failed
+
+initrd ${doz-assets}/doz-installer/initrd.img || goto failed
+boot || goto failed
+
+:failed
+echo
+echo Failed to load the installer ramdisk. Check that ${doz-assets} is
+echo reachable from the provisioning VLAN.
+echo Dropping to a shell in 30 seconds so this stays visible on the console.
+sleep 30
+shell
