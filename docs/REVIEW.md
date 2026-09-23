@@ -137,6 +137,58 @@ validation of the file actually used. The whole platform is one service,
 an install from an earlier version would have broken on the first new column.
 An additive upgrade runs on every install and update.
 
+## Third pass: IPMI management, the image store, and the panel — fixed
+
+This round added what a dedicated-server company's panel needs beyond power
+and consoles, and rebuilt the panel around it. Everything was verified
+against the simulator, which now carries a sensor repository and an event
+log, and in a browser driving the real API.
+
+**A job failing with an HTTP client's exception crashed the failure
+recorder.** `requests` exceptions carry `.request` and `.response` objects
+under the same attribute names a driver's `BMCError` uses for its JSON-able
+exchange. Recording one blew up on the JSONB column, so the job never
+reached `failed`. Only dicts are recorded now.
+
+**Job stage labels are 64 characters.** New stage texts were longer and the
+database refused them. Stages are short labels again, with detail in the
+log, and `set_stage` truncates rather than fails.
+
+**A discrete sensor's state bits parsed as the number zero.** `sdr elist`
+prints them as `0x0180`; the reading parser took the leading `0`. Hex
+readings are now text.
+
+**The README said the API held no BMC credentials.** It has since the
+console; the live power state, sensors, event log and KVM tokens are read
+by the API too. It now says so, and says what moving the API off the OOB
+network would require.
+
+**The simulator.** OpenIPMI's `ipmi_sim` drops sensor records added after a
+sensor's event support is configured, and leaves every sensor's scanning
+off on a clean start; both are worked around in the generated config and
+the run script, so `sdr elist` returns readings from the first start.
+
+What was added, and how it was verified:
+
+- Sensors (`sdr elist`), the SEL (`sel elist` / `sel info` / `sel clear`),
+  chassis status, LAN config, `mc info`, the identify LED, BMC cold reset,
+  the power-restore policy, the IPMI user table and `user set password`
+  (typed into a pty, never on the command line): each against the
+  simulator, including a password rotation that proves the new password
+  with a fresh session, proves the old one is rejected, and rotates back.
+- Boot-device override as a job (set, read back, then reset / cycle / on /
+  nothing): against the simulator, which records the device it was told.
+- Virtual media mount / boot / eject as jobs: against a recording driver;
+  the IPMI-only case fails with the reason rather than pretending.
+- The image store: upload (streamed, sanitised names, deduplicated),
+  fetch-by-URL as a job with progress and a checksum, scan, delete: against
+  a temporary directory and a mocked HTTP server, then in the browser.
+- Bulk live power for the fleet page, read in parallel with a short cache.
+- The panel: every page and tab in a browser against the simulator, light
+  and dark, desktop and phone width, with no page errors and only the
+  expected failures (no CIMC for the KVM, no power-policy command on the
+  simulator, a read-only credential backend).
+
 ## Cannot be verified without the hardware
 
 These are why the bench test exists. Run it on one server before anything
@@ -179,6 +231,27 @@ else.
    falls back to the Java launcher and the CIMC web UI, and
    `DOZ_KVM_URL_TEMPLATE` pins it once the bench test shows which one yours
    uses.
+
+8. **What the CIMC's sensor list looks like.** The parser handles ipmitool's
+   formats (numeric readings with units, discrete state text, hex state
+   bits, `ns` for no reading); sensor names and which ones exist are the
+   firmware's. DCMI power reading is optional in the spec and shown only if
+   the BMC answers it.
+
+9. **`user set password` on a CIMC with strong-password policy.** Generated
+   passwords have upper, lower, digit and a symbol and are 16 characters,
+   which is the IPMI 1.5 length every BMC accepts. If the CIMC rejects one,
+   the job says so before anything changes; if it accepts the change but a
+   fresh session then fails, the new password is still shown once so nobody
+   is locked out.
+
+10. **The power-restore policy command.** Standard IPMI, and the simulator
+    does not implement it (the panel reports that honestly). CIMC does.
+
+11. **Virtual media boot from the image store.** The same Redfish path as
+    item 2, now driven from the panel: the CIMC fetches the ISO over plain
+    HTTP from the management server's boot-asset port, which the flat
+    network makes reachable.
 
 ## Known limits that are design choices, not bugs
 

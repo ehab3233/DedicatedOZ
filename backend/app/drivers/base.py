@@ -153,6 +153,13 @@ class BMCDriver(ABC):
     @abstractmethod
     def eject_virtual_media(self) -> None: ...
 
+    def virtual_media(self) -> list[dict]:
+        """Virtual media slots and what is in them. Redfish only.
+
+        Each item: {id, name, media_types, inserted, image, image_name}.
+        """
+        raise BMCError("virtual media status is not available over this protocol")
+
     def close(self) -> None:
         return None
 

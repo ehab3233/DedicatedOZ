@@ -222,6 +222,7 @@ class AdminServerOut(ServerDetailOut):
     customer_vlan: int | None
     provisioning_mac: str | None
     last_wiped_at: datetime | None
+    state_changed_at: datetime | None = None
     notes: str | None
     customer_email: str | None = None
 
@@ -298,6 +299,84 @@ class PowerStateOut(BaseModel):
     checked_at: str
     error: str | None = None
     cached: bool = False
+
+
+BOOT_DEVICES = ("pxe", "disk", "cdrom", "bios")
+BOOT_FOLLOW_UPS = ("none", "reset", "cycle", "on")
+
+
+class BootOverrideRequest(BaseModel):
+    """One-time boot device, and whether to restart now so it takes effect."""
+
+    device: str
+    #: none: just set the flag (BMCs drop it after ~60 s with no restart).
+    #: reset: hard reset now (power on if off). cycle: off, then on. on: power on.
+    then: str = "reset"
+
+    @field_validator("device")
+    @classmethod
+    def _known_device(cls, value: str) -> str:
+        if value not in BOOT_DEVICES:
+            raise ValueError("device must be one of: " + ", ".join(BOOT_DEVICES))
+        return value
+
+    @field_validator("then")
+    @classmethod
+    def _known_follow_up(cls, value: str) -> str:
+        if value not in BOOT_FOLLOW_UPS:
+            raise ValueError("then must be one of: " + ", ".join(BOOT_FOLLOW_UPS))
+        return value
+
+
+class IdentifyRequest(BaseModel):
+    #: Seconds to blink the locator LED; 0 switches it off.
+    seconds: int = Field(default=300, ge=0, le=255 * 60)
+    #: Leave it on until switched off.
+    force: bool = False
+
+
+class PowerPolicyRequest(BaseModel):
+    policy: str = Field(pattern="^(always-on|always-off|previous)$")
+
+
+class BmcPasswordRequest(BaseModel):
+    #: Omit to have one generated. 1-16 characters (the IPMI 1.5 limit every
+    #: BMC honours), and CIMC strong-password rules want mixed case, a digit
+    #: and a symbol.
+    password: str | None = Field(default=None, min_length=8, max_length=16)
+
+
+class VmediaBootRequest(BaseModel):
+    image_id: uuid.UUID
+    #: Set a one-time CD boot and power cycle after mounting. Off = mount only.
+    boot: bool = True
+
+
+class ImageFetchRequest(BaseModel):
+    url: str = Field(min_length=8, max_length=2048)
+    name: str | None = Field(default=None, max_length=255)
+    notes: str | None = None
+
+
+class ImageUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+    notes: str | None = None
+
+
+class ImageOut(ORMModel):
+    id: uuid.UUID
+    name: str
+    filename: str
+    size_bytes: int | None
+    sha256: str | None
+    source_url: str | None
+    status: str
+    error: str | None
+    uploaded_by: str | None
+    notes: str | None
+    created_at: datetime
+    #: Where the BMC fetches it from.
+    url: str = ""
 
 
 class ReinstallRequest(BaseModel):

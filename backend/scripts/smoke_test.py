@@ -9,7 +9,9 @@ registered as SIM-0001:
   2. read live power state
   3. force off, power on, reset, power cycle -- each as a job, each confirmed
      against the simulator's own state
-  4. open the serial console over the websocket, type, and read the answer
+  4. read sensors, the event log and the BMC's own details; blink the locator
+     LED; set a one-time boot device as a job
+  5. open the serial console over the websocket, type, and read the answer
 
 Exits non-zero on the first failure, saying what failed.
 """
@@ -93,6 +95,48 @@ def main() -> int:
             f"{base}/api/v1/servers/{sid}/power?fresh=1", headers=headers, timeout=30
         ).json()
         step(f"  BMC reports power {want}", live["state"] == want, live["state"])
+
+    print("== sensors, event log, BMC ==")
+    sensors = requests.get(f"{base}/api/v1/admin/servers/{sid}/sensors?fresh=1",
+                           headers=headers, timeout=60).json()
+    numeric = [x for x in sensors.get("sensors", []) if x.get("value") is not None]
+    first = numeric[0] if numeric else {}
+    example = f"{first.get('name')} = {first.get('value')} {first.get('unit')}" if first else ""
+    step("sensor readings over IPMI", len(numeric) > 0,
+         f"{len(sensors.get('sensors', []))} sensors, e.g. {example}")
+    kinds = {x["kind"] for x in numeric}
+    step("temperatures, fans and voltages present", {"temperature", "fan", "voltage"} <= kinds,
+         ", ".join(sorted(kinds)))
+    sel = requests.get(f"{base}/api/v1/admin/servers/{sid}/sel?fresh=1", headers=headers,
+                       timeout=60).json()
+    step("event log readable", "entries" in sel and "info" in sel,
+         f"{sel.get('info', {}).get('entries')} entries")
+    info = requests.get(f"{base}/api/v1/admin/servers/{sid}/bmc/info?fresh=1", headers=headers,
+                        timeout=60).json()
+    step("BMC firmware, LAN and chassis state", bool(info.get("mc", {}).get("firmware"))
+         and "power_restore_policy" in info.get("chassis", {}),
+         f"firmware {info.get('mc', {}).get('firmware')}, "
+         f"policy {info.get('chassis', {}).get('power_restore_policy')}")
+    led = requests.post(f"{base}/api/v1/admin/servers/{sid}/identify", headers=headers,
+                        json={"seconds": 5}, timeout=30)
+    step("locator LED", led.status_code == 200, led.text[:60])
+    fleet_power = requests.get(f"{base}/api/v1/admin/power", headers=headers, timeout=60).json()
+    mine = fleet_power.get("servers", {}).get(sid, {})
+    step("fleet power read", mine.get("state") in {"on", "off"},
+         f"{mine.get('state')} via {mine.get('via')}")
+
+    r = requests.post(f"{base}/api/v1/admin/servers/{sid}/boot", headers=headers,
+                      json={"device": "pxe", "then": "reset"}, timeout=10)
+    step("queue boot once from PXE", r.status_code == 202, str(r.status_code))
+    job_id, started = r.json()["id"], time.monotonic()
+    while True:
+        job = requests.get(f"{base}/api/v1/admin/jobs/{job_id}", headers=headers,
+                           timeout=10).json()
+        if job["state"] in {"succeeded", "failed", "cancelled"} or time.monotonic() - started > 90:
+            break
+        time.sleep(0.5)
+    step("boot override job", job["state"] == "succeeded",
+         job.get("stage") if job["state"] == "succeeded" else (job.get("error") or job["state"]))
 
     print("== serial console ==")
 

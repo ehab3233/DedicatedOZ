@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { api, setToken, type Me } from '../api'
 import { Banner } from '../components'
+import { BrandMark } from '../layout/Shell'
 
 export default function Login({ onAuthenticated }: { onAuthenticated: (me: Me) => void }) {
   const [email, setEmail] = useState('')
@@ -27,36 +28,30 @@ export default function Login({ onAuthenticated }: { onAuthenticated: (me: Me) =
   return (
     <div className="login-wrap">
       <div className="login-card">
-        <h1 style={{ marginBottom: 18 }}>DedicatedOZ</h1>
+        <div className="login-brand">
+          <BrandMark />
+          <div>
+            <div className="brand-name">DedicatedOZ</div>
+            <div className="brand-role">Server management</div>
+          </div>
+        </div>
         <div className="card">
-          <form onSubmit={submit}>
-            {error && <Banner kind="error">{error}</Banner>}
-            <div className="field">
-              <label htmlFor="email">Email</label>
-              <input
-                id="email"
-                type="email"
-                autoComplete="username"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                required
-              />
-            </div>
-            <div className="field">
-              <label htmlFor="password">Password</label>
-              <input
-                id="password"
-                type="password"
-                autoComplete="current-password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                required
-              />
-            </div>
-            <button className="primary" type="submit" disabled={busy} style={{ width: '100%' }}>
-              {busy ? 'Signing in…' : 'Sign in'}
-            </button>
-          </form>
+          <div className="card-body">
+            <form onSubmit={submit}>
+              {error && <Banner kind="error">{error}</Banner>}
+              <div className="field">
+                <label htmlFor="email">Email</label>
+                <input id="email" type="email" autoComplete="username" value={email} onChange={(e) => setEmail(e.target.value)} required autoFocus />
+              </div>
+              <div className="field">
+                <label htmlFor="password">Password</label>
+                <input id="password" type="password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} required />
+              </div>
+              <button className="primary" type="submit" disabled={busy} style={{ width: '100%', marginTop: 4 }}>
+                {busy ? 'Signing in…' : 'Sign in'}
+              </button>
+            </form>
+          </div>
         </div>
       </div>
     </div>

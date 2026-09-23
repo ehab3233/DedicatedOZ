@@ -119,6 +119,9 @@ class FallbackDriver(BMCDriver):
     def eject_virtual_media(self) -> None:
         self.rich.eject_virtual_media()
 
+    def virtual_media(self) -> list[dict]:
+        return self.rich.virtual_media()
+
     def close(self) -> None:
         for driver in (self.first, self.second):
             try:

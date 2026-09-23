@@ -12,7 +12,10 @@ from __future__ import annotations
 import threading
 import time
 import uuid
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
+from typing import TypeVar
 
 from sqlalchemy.orm import Session
 
@@ -58,3 +61,58 @@ def read_power(db: Session, server: Server, *, fresh: bool = False) -> dict:
 def forget(server_id: uuid.UUID) -> None:
     with _lock:
         _cache.pop(server_id, None)
+        for key in [k for k in _live if k[1] == server_id]:
+            _live.pop(key, None)
+
+
+def read_power_many(
+    server_ids: list[uuid.UUID], *, fresh: bool = False, workers: int = 8
+) -> dict[str, dict]:
+    """Power state for a whole fleet page, read in parallel.
+
+    Each server gets its own session and thread; the per-server cache still
+    applies, so a page refreshing every thirty seconds costs one IPMI call
+    per server per cache period, not per viewer.
+    """
+    from app.db import SessionLocal
+
+    def one(server_id: uuid.UUID) -> dict | None:
+        db = SessionLocal()
+        try:
+            server = db.get(Server, server_id)
+            if server is None:
+                return None
+            return read_power(db, server, fresh=fresh)
+        finally:
+            db.close()
+
+    out: dict[str, dict] = {}
+    with ThreadPoolExecutor(max_workers=max(1, min(workers, len(server_ids) or 1))) as pool:
+        for server_id, result in zip(server_ids, pool.map(one, server_ids), strict=True):
+            if result is not None:
+                out[str(server_id)] = result
+    return out
+
+
+T = TypeVar("T")
+
+#: (what, server id) -> (read at, value). Sensors, event log, BMC info.
+_live: dict[tuple[str, uuid.UUID], tuple[float, object]] = {}
+
+
+def cached(what: str, server_id: uuid.UUID, fn: Callable[[], T], *, fresh: bool = False) -> T:
+    """Memoise a live BMC read for `settings.bmc_live_cache_seconds`.
+
+    Several people with the same server page open share one IPMI session
+    instead of each opening their own against a BMC that allows a handful.
+    """
+    key = (what, server_id)
+    now = time.monotonic()
+    with _lock:
+        hit = _live.get(key)
+        if hit and not fresh and now - hit[0] < settings.bmc_live_cache_seconds:
+            return hit[1]  # type: ignore[return-value]
+    value = fn()
+    with _lock:
+        _live[key] = (time.monotonic(), value)
+    return value

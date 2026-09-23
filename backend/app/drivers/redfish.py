@@ -465,6 +465,23 @@ class RedfishDriver(BMCDriver):
                 "virtual media did not report as inserted", response=_redact(after)
             )
 
+    def virtual_media(self) -> list[dict]:
+        out = []
+        for member in self._virtual_media_members():
+            resource = self._get(member["@odata.id"])
+            out.append(
+                {
+                    "id": resource.get("Id"),
+                    "name": resource.get("Name"),
+                    "media_types": resource.get("MediaTypes") or [],
+                    "inserted": bool(resource.get("Inserted")),
+                    "image": resource.get("Image"),
+                    "image_name": resource.get("ImageName"),
+                    "connected_via": resource.get("ConnectedVia"),
+                }
+            )
+        return out
+
     def eject_virtual_media(self) -> None:
         try:
             resource = self._find_removable_media()

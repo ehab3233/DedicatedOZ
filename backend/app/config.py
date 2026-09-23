@@ -76,6 +76,17 @@ class Settings(BaseSettings):
     # fall back to the Java launcher. Placeholders: {host} {tkn1} {tkn2}.
     kvm_url_template: str = ""
 
+    # Live sensor, event-log and BMC-info reads for the panel are cached this
+    # long, so several open tabs share one BMC round trip instead of each
+    # starting their own IPMI session.
+    bmc_live_cache_seconds: int = 3
+
+    # --- images ------------------------------------------------------------
+    # Where uploaded ISO images live. Empty means <repo>/installer/assets/iso,
+    # which nginx serves at {boot_asset_base_url}/iso/ on the management
+    # server -- the URL the BMC fetches virtual media from.
+    image_dir: str = ""
+
     # --- provisioning ------------------------------------------------------
     # How long a graceful shutdown may take before the job reports that the OS
     # ignored it. It is never escalated to a forced power-off automatically:

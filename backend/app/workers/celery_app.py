@@ -33,9 +33,15 @@ celery_app.conf.update(
         "doz.poll.*": {"queue": "poll"},
     },
     beat_schedule={
+        # PSU, fan, temperature and drive state onto the server row.
         "poll-health": {
             "task": "doz.poll.health_all",
-            "schedule": crontab(minute="*/15"),
+            "schedule": crontab(minute="*/5"),
+        },
+        # Drives, NICs, firmware, BIOS: slower to read, slower to change.
+        "poll-inventory": {
+            "task": "doz.poll.inventory_all",
+            "schedule": crontab(minute="7,37"),
         },
         "poll-bandwidth": {
             "task": "doz.poll.bandwidth_all",

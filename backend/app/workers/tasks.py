@@ -24,7 +24,8 @@ from app.drivers.factory import credential_for
 from app.drivers.fallback import FallbackDriver, protocol_label
 from app.drivers.redfish import RedfishDriver
 from app.enums import ActorType, JobState, JobType, PowerAction, ServerState
-from app.models import Job, Server
+from app.models import Image, Job, Server
+from app.services import images
 from app.services import jobs as job_service
 from app.services.lifecycle import IllegalTransition, transition_server
 from app.workers.celery_app import celery_app
@@ -92,13 +93,18 @@ def _record_failure(job_uuid: uuid.UUID, exc: BaseException) -> None:
             return
 
         job_service.transition_job(db, job, JobState.FAILED, error=str(exc) or repr(exc))
+        # Only a driver's BMCError carries a JSON-able exchange. Other
+        # exceptions (an HTTP client's, say) hang their own objects off the
+        # same attribute names, and those must not reach the JSONB column.
+        request = getattr(exc, "request", None)
+        response = getattr(exc, "response", None)
         job_service.log(
             db,
             job,
             f"job failed: {exc}",
             level="error",
-            request=getattr(exc, "request", None),
-            response=getattr(exc, "response", None),
+            request=request if isinstance(request, dict) else None,
+            response=response if isinstance(response, dict) else None,
             customer_visible=True,
         )
 
@@ -316,6 +322,198 @@ def bmc_setup_task(self, job_id: str) -> dict:  # noqa: ANN001
         )
         db.commit()
         return result
+
+
+# ---------------------------------------------------------------------------
+# Boot device and virtual media
+# ---------------------------------------------------------------------------
+
+#: API device name -> driver target, and how the panel labels it.
+BOOT_TARGET_FOR = {"pxe": "pxe", "disk": "hdd", "cdrom": "cd", "bios": "bios"}
+BOOT_LABEL = {
+    "pxe": "network (PXE)", "disk": "the first disk", "cdrom": "CD/DVD or virtual media",
+    "bios": "BIOS setup",
+}
+
+
+@celery_app.task(name="doz.power.boot_override", bind=True, max_retries=0)
+def boot_override_task(self, job_id: str) -> dict:  # noqa: ANN001
+    """Set a one-time boot device and, unless told not to, restart into it.
+
+    Boot flags are volatile: most BMCs drop them a minute after they are set if
+    no boot follows. So the default is to reset straight away, and "set it and
+    do nothing" is only for when the operator is about to reboot by hand.
+    """
+    with job_runner(job_id) as ctx:
+        if ctx is None:
+            return {"skipped": True}
+        db, job, server = ctx
+        if server is None:
+            raise RuntimeError("boot override job has no server")
+        device = job.payload.get("device", "pxe")
+        then = job.payload.get("then", "reset")
+        label = BOOT_LABEL.get(device, device)
+        sink = job_service.make_log_sink(db, job)
+
+        with get_driver(server, log=sink) as driver:
+            job_service.set_stage(db, job, f"setting next boot to {label}", progress=20)
+            db.commit()
+            driver.set_boot_once(BOOT_TARGET_FOR[device])
+            via = protocol_label(driver)
+            result: dict = {"device": device, "then": then, "via": via}
+
+            if then == "none":
+                job_service.log(
+                    db, job,
+                    "the boot flag is volatile: most BMCs drop it about a minute after it "
+                    "is set if no restart follows",
+                    customer_visible=True,
+                )
+                job_service.set_stage(
+                    db, job, f"next boot: {label} (restart within a minute)", progress=100
+                )
+            else:
+                state = driver.power_status().state
+                if then == "cycle":
+                    job_service.set_stage(db, job, "power cycling", progress=50)
+                    db.commit()
+                    driver.power_cycle()
+                elif state != "on":
+                    job_service.set_stage(db, job, "powering on", progress=50)
+                    db.commit()
+                    driver.power(PowerAction.ON)
+                elif then == "reset":
+                    job_service.set_stage(db, job, "resetting", progress=50)
+                    db.commit()
+                    driver.power(PowerAction.FORCE_RESTART)
+                else:  # "on" while already on: the flag applies at the next boot
+                    job_service.log(db, job, "already powered on; the boot device applies "
+                                    "at the next boot", customer_visible=True)
+                reached = driver.wait_for_power_state("on", timeout=120, interval=3)
+                final = driver.power_status().state
+                server.last_power_state = final
+                result.update({"power_state": final, "reached_target": reached})
+                job_service.set_stage(db, job, f"booting from {label}", progress=100)
+
+        job.result = result
+        db.add(server)
+        db.commit()
+        return result
+    return {"skipped": True}
+
+
+@celery_app.task(name="doz.power.vmedia", bind=True, max_retries=0)
+def vmedia_task(self, job_id: str) -> dict:  # noqa: ANN001
+    """Mount an ISO from the image store as virtual media and boot it, or eject.
+
+    Virtual media is Redfish only; on a server pinned to IPMI the driver says
+    so and the job fails with that reason rather than pretending.
+    """
+    with job_runner(job_id) as ctx:
+        if ctx is None:
+            return {"skipped": True}
+        db, job, server = ctx
+        if server is None:
+            raise RuntimeError("virtual media job has no server")
+        sink = job_service.make_log_sink(db, job)
+
+        with get_driver(server, log=sink) as driver:
+            if JobType(job.type) is JobType.VMEDIA_EJECT:
+                job_service.set_stage(db, job, "ejecting virtual media", progress=30)
+                db.commit()
+                driver.eject_virtual_media()
+                job_service.set_stage(db, job, "virtual media ejected", progress=100)
+                result = {"ejected": True}
+            else:
+                url = job.payload["image_url"]
+                name = job.payload.get("image_name") or url.rsplit("/", 1)[-1]
+                boot = bool(job.payload.get("boot", True))
+                job_service.log(db, job, f"image: {name} from {url}", customer_visible=True)
+                job_service.set_stage(db, job, "mounting the image as virtual media", progress=25)
+                db.commit()
+                driver.insert_virtual_media(url)
+                result = {"image": name, "url": url, "booted": False}
+                if boot:
+                    job_service.set_stage(
+                        db, job, "setting a one-time boot from the virtual CD", progress=50
+                    )
+                    db.commit()
+                    driver.set_boot_once("cd")
+                    job_service.set_stage(db, job, "power cycling into the image", progress=70)
+                    db.commit()
+                    driver.power_cycle()
+                    reached = driver.wait_for_power_state("on", timeout=120, interval=3)
+                    server.last_power_state = driver.power_status().state
+                    result.update({"booted": True, "reached_target": reached})
+                    job_service.set_stage(
+                        db, job, "booting from virtual media; open the KVM", progress=100
+                    )
+                else:
+                    job_service.set_stage(db, job, "virtual media mounted", progress=100)
+
+        job.result = result
+        db.add(server)
+        db.commit()
+        return result
+    return {"skipped": True}
+
+
+@celery_app.task(name="doz.provision.image_fetch", bind=True, max_retries=0)
+def image_fetch_task(self, job_id: str) -> dict:  # noqa: ANN001
+    """Download an ISO into the image store, with progress and cancellation."""
+    with job_runner(job_id) as ctx:
+        if ctx is None:
+            return {"skipped": True}
+        db, job, _server = ctx
+        image = db.get(Image, uuid.UUID(job.payload["image_id"]))
+        if image is None:
+            raise RuntimeError("the image row was deleted before the download started")
+        dest = images.image_dir() / image.filename
+        part = dest.with_name(f"{image.filename}.part")
+        last_pct = -1
+
+        def progress(done: int, total: int | None) -> None:
+            nonlocal last_pct
+            pct = int(done * 100 / total) if total else 0
+            done_mb, total_mb = done // (1024 * 1024), (total or 0) // (1024 * 1024)
+            if total:
+                stage = f"downloading: {done_mb} of {total_mb} MB"
+            else:
+                stage = f"downloading: {done_mb} MB"
+            job.stage = stage
+            job.progress = min(99, pct)
+            if pct // 10 != last_pct // 10:
+                job_service.log(db, job, stage, customer_visible=True)
+                last_pct = pct
+            db.add(job)
+            _check_cancel(db, job)
+
+        job_service.log(db, job, f"from {image.source_url}", customer_visible=True)
+        job_service.set_stage(db, job, "downloading", progress=1)
+        db.commit()
+        try:
+            size, digest = images.download(image.source_url or "", part, progress=progress)
+        except BaseException as exc:
+            part.unlink(missing_ok=True)
+            with session_scope() as clean:
+                row = clean.get(Image, image.id)
+                if row is not None:
+                    row.status = "failed"
+                    row.error = ("cancelled" if isinstance(exc, JobCancelled) else str(exc))[:2000]
+            raise
+        part.replace(dest)
+        image.size_bytes = size
+        image.sha256 = digest
+        image.status = "ready"
+        image.error = None
+        db.add(image)
+        result = {"filename": image.filename, "size_bytes": size, "sha256": digest}
+        job.result = result
+        job_service.log(db, job, f"saved as {image.filename}", customer_visible=True)
+        job_service.set_stage(db, job, f"downloaded, {size // (1024 * 1024)} MB", progress=100)
+        db.commit()
+        return result
+    return {"skipped": True}
 
 
 # ---------------------------------------------------------------------------
@@ -624,6 +822,41 @@ def health_all_task() -> dict:
     return {"queued": len(ids)}
 
 
+@celery_app.task(name="doz.poll.inventory_one", max_retries=0)
+def inventory_sweep_one_task(server_id: str) -> dict:
+    """Scheduled inventory refresh for one server: drives, NICs, firmware.
+
+    Like the health sweep, not a job: it runs for every server every half
+    hour so that drive health, NIC link state and firmware in the panel are
+    what the BMC reports now, not what it reported when the server was added.
+    """
+    with session_scope() as db:
+        server = db.get(Server, uuid.UUID(server_id))
+        if server is None:
+            return {"error": "server not found"}
+        try:
+            return _sync_inventory(db, server)
+        except BMCError as exc:
+            return {"error": str(exc)}
+
+
+@celery_app.task(name="doz.poll.inventory_all", max_retries=0)
+def inventory_all_task() -> dict:
+    with session_scope() as db:
+        ids = (
+            db.execute(
+                select(Server.id).where(
+                    Server.state.notin_([ServerState.RETIRED.value, ServerState.RMA.value])
+                )
+            )
+            .scalars()
+            .all()
+        )
+    for server_id in ids:
+        inventory_sweep_one_task.delay(str(server_id))
+    return {"queued": len(ids)}
+
+
 @celery_app.task(name="doz.poll.bandwidth_all", max_retries=0)
 def bandwidth_all_task() -> dict:
     """Placeholder for switch counter collection.
@@ -649,6 +882,10 @@ TASK_FOR_JOB_TYPE: dict[JobType, Callable] = {
     JobType.POWER_CYCLE: power_task,
     JobType.POWER_RESET: power_task,
     JobType.BMC_SETUP: bmc_setup_task,
+    JobType.BOOT_OVERRIDE: boot_override_task,
+    JobType.VMEDIA_BOOT: vmedia_task,
+    JobType.VMEDIA_EJECT: vmedia_task,
+    JobType.IMAGE_FETCH: image_fetch_task,
     JobType.INSTALL: install_task,
     JobType.RESCUE: rescue_task,
     JobType.WIPE: wipe_task,

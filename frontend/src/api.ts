@@ -174,6 +174,7 @@ export interface AdminServer extends ServerDetail {
   customer_vlan: number | null
   provisioning_mac: string | null
   last_wiped_at: string | null
+  state_changed_at: string | null
   notes: string | null
   customer_email: string | null
 }
@@ -387,6 +388,64 @@ export const api = {
       username: string | null
     }>(`/api/v1/admin/servers/${id}/bmc`),
   system: () => request<SystemStatus>('/api/v1/admin/system'),
+  fleetPower: (fresh = false) =>
+    request<{ servers: Record<string, PowerState>; checked_at: string }>(
+      `/api/v1/admin/power${fresh ? '?fresh=1' : ''}`,
+    ),
+  sensors: (id: string, fresh = false) =>
+    request<SensorReport>(`/api/v1/admin/servers/${id}/sensors${fresh ? '?fresh=1' : ''}`),
+  eventLog: (id: string, fresh = false) =>
+    request<SelReport>(`/api/v1/admin/servers/${id}/sel${fresh ? '?fresh=1' : ''}`),
+  clearEventLog: (id: string) =>
+    request<{ cleared: boolean; entries_removed: number }>(`/api/v1/admin/servers/${id}/sel`, {
+      method: 'DELETE',
+    }),
+  bmcInfo: (id: string, fresh = false) =>
+    request<BmcInfo>(`/api/v1/admin/servers/${id}/bmc/info${fresh ? '?fresh=1' : ''}`),
+  identify: (id: string, body: { seconds?: number; force?: boolean }) =>
+    request<{ led: string }>(`/api/v1/admin/servers/${id}/identify`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  bmcReset: (id: string) =>
+    request<{ reset: string; note: string }>(`/api/v1/admin/servers/${id}/bmc/reset`, {
+      method: 'POST',
+    }),
+  setPowerPolicy: (id: string, policy: string) =>
+    request<{ policy: string; chassis: Record<string, string> }>(
+      `/api/v1/admin/servers/${id}/bmc/power-policy`,
+      { method: 'POST', body: JSON.stringify({ policy }) },
+    ),
+  rotateBmcPassword: (id: string, password?: string) =>
+    request<{ username: string; password: string; verified: boolean; stored: boolean; error: string | null }>(
+      `/api/v1/admin/servers/${id}/bmc/password`,
+      { method: 'POST', body: JSON.stringify(password ? { password } : {}) },
+    ),
+  bootOverride: (id: string, device: BootDevice, then: BootFollowUp) =>
+    request<Job>(`/api/v1/admin/servers/${id}/boot`, {
+      method: 'POST',
+      body: JSON.stringify({ device, then }),
+    }),
+  vmedia: (id: string) => request<VmediaStatus>(`/api/v1/admin/servers/${id}/vmedia`),
+  vmediaBoot: (id: string, imageId: string, boot = true) =>
+    request<Job>(`/api/v1/admin/servers/${id}/vmedia/boot`, {
+      method: 'POST',
+      body: JSON.stringify({ image_id: imageId, boot }),
+    }),
+  vmediaEject: (id: string) =>
+    request<Job>(`/api/v1/admin/servers/${id}/vmedia/eject`, { method: 'POST' }),
+
+  // --- admin: images ---
+  images: () => request<Image[]>('/api/v1/admin/images'),
+  fetchImage: (url: string, name?: string) =>
+    request<{ image: Image; job: Job }>('/api/v1/admin/images/fetch', {
+      method: 'POST',
+      body: JSON.stringify({ url, name: name || null }),
+    }),
+  scanImages: () => request<Image[]>('/api/v1/admin/images/scan', { method: 'POST' }),
+  updateImage: (id: string, body: { name?: string; notes?: string }) =>
+    request<Image>(`/api/v1/admin/images/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  deleteImage: (id: string) => request<void>(`/api/v1/admin/images/${id}`, { method: 'DELETE' }),
 
   // --- admin: jobs ---
   adminJobs: (params: { state?: string; server_id?: string } = {}) => {
@@ -512,4 +571,149 @@ export interface SystemStatus {
   ipmi_cipher_suite: string
   secrets_backend: string
   workers_error?: string
+}
+
+// ---------------------------------------------------------------------------
+// IPMI management types
+// ---------------------------------------------------------------------------
+
+export type SensorKind = 'temperature' | 'fan' | 'voltage' | 'power' | 'current' | 'discrete'
+
+export interface Sensor {
+  name: string
+  number: number | null
+  status: 'ok' | 'warning' | 'critical' | 'no_reading' | 'unknown'
+  raw_status: string
+  entity: string
+  reading: string
+  value: number | null
+  unit: string | null
+  kind: SensorKind
+}
+
+export interface SensorReport {
+  sensors: Sensor[]
+  power: { watts: number; minimum: number | null; maximum: number | null; average: number | null } | null
+  checked_at: string
+  via: string
+}
+
+export interface SelEntry {
+  id: number
+  timestamp: string | null
+  raw_time: string
+  sensor: string
+  event: string
+  direction: string
+  detail: string | null
+  severity: 'info' | 'warning' | 'critical'
+}
+
+export interface SelReport {
+  info: {
+    entries: number
+    free_bytes: number | null
+    percent_used: number | null
+    last_add: string | null
+    last_clear: string | null
+    overflow: boolean
+  }
+  entries: SelEntry[]
+  checked_at: string
+}
+
+export interface BmcInfo {
+  mc: {
+    firmware: string | null
+    ipmi_version: string | null
+    manufacturer: string | null
+    product: string | null
+    device_id: string | null
+    available: boolean
+  }
+  lan: {
+    channel: number
+    ip_address: string | null
+    subnet_mask: string | null
+    gateway: string | null
+    mac_address: string | null
+    source: string | null
+    vlan: string | null
+  }
+  chassis: Record<string, string>
+  users: Array<{ id: number; name: string; privilege: string; ipmi_messaging: boolean }>
+  checked_at: string
+}
+
+export type BootDevice = 'pxe' | 'disk' | 'cdrom' | 'bios'
+export type BootFollowUp = 'none' | 'reset' | 'cycle' | 'on'
+
+export interface VmediaStatus {
+  supported: boolean
+  media: Array<{
+    id: string | null
+    name: string | null
+    media_types: string[]
+    inserted: boolean
+    image: string | null
+    image_name: string | null
+  }>
+  error: string | null
+  checked_at: string
+}
+
+export interface Image {
+  id: string
+  name: string
+  filename: string
+  size_bytes: number | null
+  sha256: string | null
+  source_url: string | null
+  status: 'ready' | 'fetching' | 'failed'
+  error: string | null
+  uploaded_by: string | null
+  notes: string | null
+  created_at: string
+  url: string
+}
+
+/**
+ * Upload an ISO with progress. XMLHttpRequest rather than fetch because only
+ * XHR reports upload progress, and a 4 GB file without a progress bar looks
+ * like a hang.
+ */
+export function uploadImage(
+  file: File,
+  name: string,
+  onProgress: (fraction: number) => void,
+): { promise: Promise<Image>; abort: () => void } {
+  const xhr = new XMLHttpRequest()
+  const params = new URLSearchParams({ filename: file.name, name: name || file.name })
+  const promise = new Promise<Image>((resolve, reject) => {
+    xhr.open('PUT', `/api/v1/admin/images/upload?${params}`)
+    const token = getToken()
+    if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`)
+    xhr.setRequestHeader('Content-Type', 'application/octet-stream')
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable) onProgress(event.loaded / event.total)
+    }
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve(JSON.parse(xhr.responseText) as Image)
+        return
+      }
+      let detail = `${xhr.status} ${xhr.statusText}`
+      try {
+        const body = JSON.parse(xhr.responseText)
+        if (typeof body.detail === 'string') detail = body.detail
+      } catch {
+        /* keep the status line */
+      }
+      reject(new ApiError(xhr.status, detail))
+    }
+    xhr.onerror = () => reject(new ApiError(0, 'upload failed: connection lost'))
+    xhr.onabort = () => reject(new ApiError(0, 'upload cancelled'))
+    xhr.send(file)
+  })
+  return { promise, abort: () => xhr.abort() }
 }

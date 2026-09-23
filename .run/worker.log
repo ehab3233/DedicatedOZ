@@ -7,15 +7,15 @@ User information: uid=0 euid=0 gid=0 egid=0
 
   warnings.warn(SecurityWarning(ROOT_DISCOURAGED.format(
  
- -------------- celery@vm v5.6.3 (recovery)
+ -------------- dev@vm v5.6.3 (recovery)
 --- ***** ----- 
--- ******* ---- Linux-6.18.44-fc-v37-x86_64-with-glibc2.39 2026-09-23 11:50:11
+-- ******* ---- Linux-6.18.44-fc-v37-x86_64-with-glibc2.39 2026-09-23 14:09:30
 - *** --- * --- 
 - ** ---------- [config]
-- ** ---------- .> app:         doz:0x7f045699e190
+- ** ---------- .> app:         doz:0x7f5933e29550
 - ** ---------- .> transport:   redis://localhost:6379/0
 - ** ---------- .> results:     redis://localhost:6379/0
-- *** --- * --- .> concurrency: 4 (prefork)
+- *** --- * --- .> concurrency: 2 (prefork)
 -- ******* ---- .> task events: OFF (enable -E to monitor tasks in this worker)
 --- ***** ----- 
  -------------- [queues]
@@ -28,23 +28,53 @@ User information: uid=0 euid=0 gid=0 egid=0
   . doz.poll.health
   . doz.poll.health_all
   . doz.poll.health_one
+  . doz.poll.inventory_all
+  . doz.poll.inventory_one
   . doz.poll.inventory_sync
   . doz.poll.reap_jobs
   . doz.poll.redispatch_queued
+  . doz.power.bmc_setup
+  . doz.power.boot_override
   . doz.power.execute
+  . doz.power.vmedia
+  . doz.provision.image_fetch
   . doz.provision.install
   . doz.provision.rescue
   . doz.provision.wipe
 
-[2026-09-23 11:50:11,852: INFO/MainProcess] Connected to redis://localhost:6379/0
-[2026-09-23 11:50:11,857: INFO/MainProcess] mingle: searching for neighbors
-[2026-09-23 11:50:12,867: INFO/MainProcess] mingle: all alone
-[2026-09-23 11:50:12,880: INFO/MainProcess] celery@vm ready.
-[2026-09-23 11:50:12,883: INFO/MainProcess] Task doz.poll.redispatch_queued[64b3f7d9-3d49-4a5e-8771-ab3581ead94d] received
-[2026-09-23 11:50:12,885: INFO/MainProcess] Task doz.poll.reap_jobs[2cbf34f0-a318-4732-82e7-5e0c1f3bca81] received
-[2026-09-23 11:50:12,886: INFO/MainProcess] Task doz.poll.bandwidth_all[0501e993-49ef-465e-b3b2-dda7c069acc6] received
-[2026-09-23 11:50:12,894: INFO/ForkPoolWorker-3] Task doz.poll.bandwidth_all[0501e993-49ef-465e-b3b2-dda7c069acc6] succeeded in 0.0063327610000669665s: {'collected': 0, 'note': 'switch poller not configured'}
-[2026-09-23 11:50:12,965: INFO/ForkPoolWorker-2] Task doz.poll.reap_jobs[2cbf34f0-a318-4732-82e7-5e0c1f3bca81] succeeded in 0.07893947200000184s: {'reaped': 0}
-[2026-09-23 11:50:12,975: INFO/ForkPoolWorker-4] Task doz.poll.redispatch_queued[64b3f7d9-3d49-4a5e-8771-ab3581ead94d] succeeded in 0.09085124800003541s: {'stuck': 0, 'redispatched': 0}
-
-worker: Warm shutdown (MainProcess)
+[2026-09-23 14:09:30,633: INFO/MainProcess] Connected to redis://localhost:6379/0
+[2026-09-23 14:09:30,638: INFO/MainProcess] mingle: searching for neighbors
+[2026-09-23 14:09:31,647: INFO/MainProcess] mingle: all alone
+[2026-09-23 14:09:31,659: INFO/MainProcess] dev@vm ready.
+[2026-09-23 14:11:30,448: INFO/MainProcess] Task doz.power.boot_override[04d24a53-26a1-47a1-aa17-e5135795ca7d] received
+[2026-09-23 14:11:30,945: INFO/ForkPoolWorker-2] Task doz.power.boot_override[04d24a53-26a1-47a1-aa17-e5135795ca7d] succeeded in 0.49431902899959823s: {'device': 'pxe', 'then': 'reset', 'via': 'ipmi', 'power_state': 'on', 'reached_target': True}
+[2026-09-23 14:11:54,551: INFO/MainProcess] Task doz.provision.image_fetch[fc850dbe-9c2b-49fe-915a-b6dfec6d868d] received
+[2026-09-23 14:11:54,638: INFO/ForkPoolWorker-2] Task doz.provision.image_fetch[fc850dbe-9c2b-49fe-915a-b6dfec6d868d] succeeded in 0.08566981500007387s: {'filename': 'mirror-ubuntu-mini.iso', 'size_bytes': 2097152, 'sha256': 'a179eda86b89dd137c4e0806523848b7754e529b0d807f3dc7350108eb9ede98'}
+[2026-09-23 14:13:10,039: INFO/MainProcess] Task doz.power.boot_override[8263694b-6608-438f-a6ed-7e999f9eb760] received
+[2026-09-23 14:13:10,420: INFO/ForkPoolWorker-2] Task doz.power.boot_override[8263694b-6608-438f-a6ed-7e999f9eb760] succeeded in 0.379714843000329s: {'device': 'pxe', 'then': 'reset', 'via': 'ipmi', 'power_state': 'on', 'reached_target': True}
+[2026-09-23 14:13:33,783: INFO/MainProcess] Task doz.provision.image_fetch[2850e8a8-5a56-4d2c-9baf-8466edea1e61] received
+[2026-09-23 14:13:33,836: INFO/ForkPoolWorker-2] Task doz.provision.image_fetch[2850e8a8-5a56-4d2c-9baf-8466edea1e61] succeeded in 0.05159050800011755s: {'filename': 'mirror-ubuntu-mini-2.iso', 'size_bytes': 2097152, 'sha256': 'a179eda86b89dd137c4e0806523848b7754e529b0d807f3dc7350108eb9ede98'}
+[2026-09-23 14:13:35,520: INFO/MainProcess] Task doz.power.vmedia[45d95af7-9f07-42e2-923d-975d07db5362] received
+[2026-09-23 14:13:35,544: ERROR/ForkPoolWorker-2] Task doz.power.vmedia[45d95af7-9f07-42e2-923d-975d07db5362] raised unexpected: BMCError('virtual media is not available over IPMI; use Redfish')
+Traceback (most recent call last):
+  File "/home/user/DedicatedOZ/backend/.venv/lib/python3.11/site-packages/celery/app/trace.py", line 585, in trace_task
+    R = retval = fun(*args, **kwargs)
+                 ^^^^^^^^^^^^^^^^^^^^
+  File "/home/user/DedicatedOZ/backend/.venv/lib/python3.11/site-packages/celery/app/trace.py", line 858, in __protected_call__
+    return self.run(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/user/DedicatedOZ/backend/app/workers/tasks.py", line 434, in vmedia_task
+    driver.insert_virtual_media(url)
+  File "/home/user/DedicatedOZ/backend/app/drivers/ipmi.py", line 473, in insert_virtual_media
+    raise BMCError("virtual media is not available over IPMI; use Redfish")
+app.drivers.base.BMCError: virtual media is not available over IPMI; use Redfish
+[2026-09-23 14:17:33,963: INFO/MainProcess] Task doz.power.execute[b37976b1-607a-4fa1-abf6-ce0511ade05a] received
+[2026-09-23 14:17:34,195: INFO/ForkPoolWorker-2] Task doz.power.execute[b37976b1-607a-4fa1-abf6-ce0511ade05a] succeeded in 0.2308250850001059s: {'power_state': 'off', 'reached_target': True, 'via': 'ipmi'}
+[2026-09-23 14:17:34,583: INFO/MainProcess] Task doz.power.execute[905d2538-b692-4e28-8c97-326bd505b966] received
+[2026-09-23 14:17:34,857: INFO/ForkPoolWorker-2] Task doz.power.execute[905d2538-b692-4e28-8c97-326bd505b966] succeeded in 0.27328450299864926s: {'power_state': 'on', 'reached_target': True, 'via': 'ipmi'}
+[2026-09-23 14:17:35,212: INFO/MainProcess] Task doz.power.execute[f59aaa8e-06ff-48c0-b7b3-d1de749dcf8a] received
+[2026-09-23 14:17:35,468: INFO/ForkPoolWorker-2] Task doz.power.execute[f59aaa8e-06ff-48c0-b7b3-d1de749dcf8a] succeeded in 0.25466491899896937s: {'power_state': 'on', 'reached_target': True, 'via': 'ipmi'}
+[2026-09-23 14:17:35,820: INFO/MainProcess] Task doz.power.execute[6cebd7ea-93b8-402e-8c6b-c5dfb1315b41] received
+[2026-09-23 14:17:41,250: INFO/ForkPoolWorker-2] Task doz.power.execute[6cebd7ea-93b8-402e-8c6b-c5dfb1315b41] succeeded in 5.42952676799905s: {'power_state': 'on', 'reached_target': True, 'via': 'ipmi'}
+[2026-09-23 14:17:44,214: INFO/MainProcess] Task doz.power.boot_override[689df0a3-4dab-4047-bdfc-f1b22b3bac9a] received
+[2026-09-23 14:17:44,556: INFO/ForkPoolWorker-2] Task doz.power.boot_override[689df0a3-4dab-4047-bdfc-f1b22b3bac9a] succeeded in 0.3402972120002232s: {'device': 'pxe', 'then': 'reset', 'via': 'ipmi', 'power_state': 'on', 'reached_target': True}

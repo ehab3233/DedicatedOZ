@@ -21,12 +21,17 @@ gateways, and none of it is a differentiator.
 | Service | `sudo ./doz.sh install` makes it a systemd service: `systemctl start\|stop\|restart doz`, starts at boot |
 | Inventory | Register servers, sync hardware over Redfish, track rack/switch/VLAN position |
 | Jobs | Every action is queued, with an explicit state machine and a full log of raw BMC traffic |
-| Power | Live state, on, graceful shut down, force off, reset, power cycle — over IPMI with Redfish as fallback, each confirmed by reading the state back |
+| Power | Live state, on, graceful shut down, force off, reset, power cycle — over IPMI with Redfish as fallback, each confirmed by reading the state back. Bulk actions from the fleet list |
+| Sensors | Every sensor the BMC has, read live every 10 s while the page is open: temperatures, fans, voltages, PSU and power draw |
+| Event log | The BMC's System Event Log with sensor names resolved, severity, and a clear button |
+| Boot device | One-time boot from PXE, disk, CD/virtual media or BIOS setup, with the reset or power cycle that makes it take effect |
+| Images | ISO store on the management server: upload from the browser, fetch from a URL, or scan a directory. **Install from image** mounts one as virtual media on the BMC and boots it |
+| BMC tools | Locator LED, cold BMC reset, power-restore policy, IPMI user list, IPMI password rotation (set on the BMC, verified with a fresh session, stored) |
 | Reinstall | iPXE → ramdisk → StorCLI RAID → kickstart/autoinstall/preseed → phone home |
 | Rescue | Same rail, boots to RAM, disks untouched |
 | Wipe | ATA secure erase / `nvme format` / `sg_format`, gated so an unwiped server cannot return to stock |
-| Console | Serial-over-LAN in the browser (xterm.js over a websocket), with take-over when someone else holds the port |
-| vKVM | One click asks the CIMC for launch tokens and opens its HTML5 viewer, or the Java launcher on older firmware |
+| Console | Serial-over-LAN in the browser (xterm.js over a websocket), embedded in the server page or full-page, with take-over when someone else holds the port |
+| vKVM | One click asks the CIMC for launch tokens and opens its HTML5 viewer: video, keyboard and mouse passthrough, its own virtual media. Java launcher on older firmware |
 | BMC setup | **Prepare BMC** turns on IPMI over LAN, SOL and BIOS console redirection through the CIMC XML API |
 | IPAM | Blocks, assignments, free-pool view, customer-editable rDNS |
 | Health | PSU, fan, temperature and drive pre-fail, polled every 15 minutes |
@@ -34,8 +39,15 @@ gateways, and none of it is a differentiator.
 | Admin | Fleet map, lifecycle control, suspend, raw job log viewer, audit trail |
 | API | Customer tokens, same authorisation path as the portal |
 
-Not built, on purpose: billing, custom ISO upload, BIOS tuning, advanced RAID
-options, vKVM proxying. Wait until someone asks.
+Not built, on purpose: billing, BIOS tuning, advanced RAID options, and
+proxying the vKVM's video through the platform (the CIMC's own viewer is
+launched instead). Wait until someone asks.
+
+Nothing in the panel is made up. Power state, sensors, the event log and the
+BMC's details are read from the BMC when the page asks; hardware inventory
+and health are re-read on a schedule (every 30 and 5 minutes) and shown with
+their age. What a BMC cannot see — CPU load, memory use, disk space inside
+the running OS — is not shown, because it would need an agent in the OS.
 
 ---
 
@@ -109,8 +121,8 @@ and redact credentials before anything reaches the job log.
 doz.sh               run script: install / update / up / down / status / logs / sim / ...
 backend/
   app/
-    drivers/         IPMI + Redfish drivers, the fallback between them, CIMC XML API
-    services/        state machines, job engine, boot rendering, IPAM, bandwidth
+    drivers/         IPMI (power, boot, sensors, SEL, users) + Redfish (inventory, vmedia), CIMC XML API
+    services/        state machines, job engine, boot rendering, IPAM, image store, live BMC reads
     api/             HTTP surface: customer, admin, and the netboot rail
     workers/         Celery tasks
   scripts/
@@ -221,11 +233,20 @@ Log in as an admin and open **Manage**:
 
 | Page | What you do there |
 |---|---|
-| Fleet | Every server with rack position, CIMC, firmware drift, PXE MAC, state, health, customer. **Add server** registers one and syncs its hardware. |
-| Server | Live power state with on, shut down, force off, reset and power cycle; serial console; vKVM and CIMC web UI links; Prepare BMC; reinstall, rescue, secure wipe, lifecycle state, inventory sync, health check, address assignment, customer assignment, BMC protocol and ports, and every job with its raw BMC log. |
+| Dashboard | Fleet counts, how many servers are powered on right now, what needs attention (unhealthy servers, missing PXE MACs, firmware off baseline, failed jobs), recent jobs, and whether every service and worker is running. |
+| Servers | Every server with live power, state, health, location, CIMC, firmware and customer. Search, filter by state, select several for bulk power actions. **Add server** registers one and syncs its hardware. |
+| Server → Overview | Power controls, live readings (hottest sensor, inlet, fans, power draw), reinstall / install from image / rescue / wipe, boot once from a device, lifecycle, customer, location. |
+| Server → Console | Serial console in the page or full-page; vKVM launch. |
+| Server → Hardware | CPU, memory, BIOS, firmware, health subsystems, NICs (pick the PXE one), drives with predicted failure. Sync inventory and check health on demand. |
+| Server → Sensors | Every sensor, grouped, refreshed every 10 s. |
+| Server → Event log | The System Event Log, newest first, with clear. |
+| Server → Network | Addresses, switch port and VLAN, what the BMC says about its own network. |
+| Server → Jobs | Everything that has run on this server. |
+| Server → BMC | How the platform reaches it, controller details, power-restore policy, Prepare BMC, locator LED, BMC reset, password rotation, virtual media, IPMI users. |
+| Images | The ISO store: upload, fetch from URL, scan, delete. |
 | Customers | Create accounts, generate initial passwords, disable logins, see and end subscriptions. |
 | IP space | Add blocks with gateways and provenance, see utilisation, find free addresses. |
-| Jobs | Everything that has run, filterable by state, with raw Redfish exchanges. |
+| Jobs | Everything that has run, filterable by state, with raw BMC exchanges. |
 | Audit | Who did what, from where, when. |
 
 ### Tests
@@ -268,6 +289,8 @@ All of it is environment-driven; see `.env.example`. The ones that matter:
 - `DOZ_IPMI_CIPHER_SUITE` — leave it at `3` unless a BMC refuses it.
 - `DOZ_KVM_URL_TEMPLATE` — only needed if your CIMC's HTML5 viewer lives at a
   path the launcher does not probe.
+- `DOZ_IMAGE_DIR` — where uploaded ISOs live; served at
+  `DOZ_BOOT_ASSET_BASE_URL/iso/`, which is the URL a BMC mounts them from.
 - `DOZ_REQUIRE_WIPE_BEFORE_STOCK` — leave it on. It is what stops a server
   going back on sale with the last customer's data still on it.
 
@@ -283,7 +306,7 @@ Following section 11 of the spec, with the current state marked:
 4. ✅ Power control — IPMI with Redfish fallback, confirmed by read-back
 5. ✅ iPXE + installer ramdisk + OS templates
 6. ✅ Rescue mode and disk wipe
-7. ✅ Serial console in the browser, vKVM launch
+7. ✅ Serial console in the browser, vKVM launch, sensors, event log, BMC tools, ISO image store
 8. ⚠️ Bandwidth — storage, API and graphs are built; the switch poller is a
    stub, because it depends on a switch model that has not been chosen
 9. ✅ Customer UI

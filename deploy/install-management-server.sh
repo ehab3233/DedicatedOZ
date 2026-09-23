@@ -200,7 +200,8 @@ fi
 
 say "installing to $INSTALL_DIR"
 id doz >/dev/null 2>&1 || useradd --system --home-dir "$INSTALL_DIR" --shell /usr/sbin/nologin doz
-mkdir -p "$INSTALL_DIR" /etc/doz/cimc /var/lib/doz "$INSTALL_DIR/installer/assets" "$INSTALL_DIR/installer/tftp"
+mkdir -p "$INSTALL_DIR" /etc/doz/cimc /var/lib/doz "$INSTALL_DIR/installer/assets/iso" \
+         "$INSTALL_DIR/installer/tftp"
 
 if [ "$(readlink -f "$SRC_DIR")" != "$(readlink -f "$INSTALL_DIR")" ]; then
     rsync -a --delete \
@@ -283,6 +284,8 @@ DOZ_TRUST_PROXY_HEADERS=true
 DOZ_CORS_ORIGINS=http://${MGMT_IP}
 
 DOZ_INSTALLER_TEMPLATE_DIR=${INSTALL_DIR}/installer/templates
+# ISO image store, served to BMCs at http://${MGMT_IP}:8080/iso/
+DOZ_IMAGE_DIR=${INSTALL_DIR}/installer/assets/iso
 DOZ_IPMITOOL_PATH=/usr/bin/ipmitool
 DOZ_SOL_IDLE_TIMEOUT_SECONDS=1800
 # vKVM: empty probes the CIMC for its HTML5 viewer. Placeholders {host} {tkn1} {tkn2}.
@@ -458,6 +461,21 @@ server {
         try_files \$uri /index.html;
     }
 
+    # ISO uploads: multi-gigabyte bodies, streamed straight through to the
+    # API rather than buffered on nginx's disk first.
+    location = /api/v1/admin/images/upload {
+        client_max_body_size 0;
+        proxy_request_buffering off;
+        proxy_pass         http://127.0.0.1:8000;
+        proxy_http_version 1.1;
+        proxy_set_header   Host              \$host;
+        proxy_set_header   X-Real-IP         \$remote_addr;
+        proxy_set_header   X-Forwarded-For   \$proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto \$scheme;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+
     # API, netboot rail, docs. The upgrade headers carry the serial console
     # websocket; the long timeout keeps an idle console open.
     location ~ ^/(api|boot|health|docs|openapi\.json|redoc) {
@@ -474,8 +492,9 @@ server {
     }
 }
 
-# Boot assets: kernels, initrds, ISOs. Plain HTTP, no redirects -- the CIMC's
-# virtual media cannot follow one and cannot validate our certificate.
+# Boot assets: kernels, initrds, and the ISO image store under /iso/. Plain
+# HTTP, no redirects -- the CIMC's virtual media cannot follow one and cannot
+# validate our certificate.
 server {
     listen 8080;
     server_name _;

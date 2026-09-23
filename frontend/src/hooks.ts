@@ -60,3 +60,26 @@ export function usePolling(fn: () => void | Promise<void>, intervalMs: number, a
     }
   }, [intervalMs, active])
 }
+
+/** Poll a job until it finishes. Resolves with the final row; rejects on failure. */
+export async function waitForJob(
+  jobId: string,
+  onUpdate?: (job: import('./api').Job) => void,
+  intervalMs = 1500,
+): Promise<import('./api').Job> {
+  const { api } = await import('./api')
+  for (;;) {
+    await new Promise((r) => setTimeout(r, intervalMs))
+    let job: import('./api').Job
+    try {
+      job = await api.job(jobId)
+    } catch {
+      continue
+    }
+    onUpdate?.(job)
+    if (job.state === 'succeeded') return job
+    if (job.state === 'failed' || job.state === 'cancelled') {
+      throw new Error(job.error ?? `job ${job.state}`)
+    }
+  }
+}

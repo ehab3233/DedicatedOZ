@@ -3,8 +3,10 @@ import { Link, useParams } from 'react-router-dom'
 import { api, type Job, type OSTemplate, type SSHKey } from '../api'
 import {
   Banner,
+  Card,
   Empty,
   Modal,
+  PageHeader,
   Pill,
   Progress,
   formatBits,
@@ -46,18 +48,12 @@ export default function ServerDetail({ isAdmin }: { isAdmin: boolean }) {
 
   return (
     <main className="page">
-      <div className="spread">
-        <div>
-          <h1>{s.hostname ?? s.serial}</h1>
-          <p className="subtle mono">
-            {s.serial} · {s.model} {s.datacenter ? `· ${s.datacenter}` : ''}
-          </p>
-        </div>
-        <div className="row">
-          <Pill value={s.state} />
-          <Pill value={s.health_status} />
-        </div>
-      </div>
+      <PageHeader
+        crumbs={[{ label: 'Servers', to: '/servers' }, { label: s.serial }]}
+        title={<span className="row" style={{ gap: 10 }}>{s.hostname ?? s.serial}<Pill value={s.state} /><Pill value={s.health_status} /></span>}
+        sub={<span className="mono">{s.serial} · {s.model}{s.datacenter ? ` · ${s.datacenter}` : ''}</span>}
+        actions={<Link className="button" to={`/servers/${id}/console`}>Serial console</Link>}
+      />
 
       {error && <Banner kind="error">{error}</Banner>}
       {notice && <Banner kind="info">{notice}</Banner>}
@@ -65,37 +61,22 @@ export default function ServerDetail({ isAdmin }: { isAdmin: boolean }) {
       {activeJob && <ActiveJobCard job={activeJob} />}
 
       {/* --- power ------------------------------------------------------ */}
-      <div className="card">
-        <PowerControls serverId={id} activeJob={activeJob ?? null} onChanged={refresh} pollMs={30000} />
-      </div>
+      <Card><div className="card-body tight"><PowerControls serverId={id} activeJob={activeJob ?? null} onChanged={refresh} /></div></Card>
 
-      <div className="card">
+      <Card title="Operating system">
         <div className="spread">
-          <div>
-            <strong>Operating system</strong>
-            <div className="subtle">
-              Reinstall wipes the array. Rescue boots to RAM and leaves the disks alone.
-            </div>
-          </div>
+          <div className="subtle">Reinstall wipes the array. Rescue boots to RAM and leaves the disks alone.</div>
           <div className="row">
-            <button disabled={locked} onClick={() => setRescuing(true)}>
-              Rescue mode
-            </button>
-            <button className="danger" disabled={locked} onClick={() => setReinstalling(true)}>
-              Reinstall
-            </button>
-            <Link className="button" to={`/servers/${id}/console`}>
-              Serial console
-            </Link>
+            <button disabled={locked} onClick={() => setRescuing(true)}>Rescue mode</button>
+            <button className="danger" disabled={locked} onClick={() => setReinstalling(true)}>Reinstall</button>
           </div>
         </div>
-      </div>
+      </Card>
 
       {/* --- hardware --------------------------------------------------- */}
-      <h2>Hardware</h2>
       <div className="grid cols-2">
-        <div className="card">
-          <table>
+        <Card title="Hardware">
+          <table className="kv-table">
             <tbody>
               <tr>
                 <td className="subtle">CPU</td>
@@ -115,16 +96,12 @@ export default function ServerDetail({ isAdmin }: { isAdmin: boolean }) {
               </tr>
             </tbody>
           </table>
-        </div>
-        <div className="card">
-          <strong style={{ fontSize: 14 }}>Health</strong>
-          <div className="subtle" style={{ marginBottom: 8 }}>
-            Checked {relativeTime(s.health_checked_at)}
-          </div>
+        </Card>
+        <Card title="Health" actions={<Pill value={s.health_status} />} note={`Checked ${relativeTime(s.health_checked_at)}`}>
           {Object.entries(s.health?.subsystems ?? {}).length === 0 ? (
             <div className="subtle">No health data collected yet.</div>
           ) : (
-            <table>
+            <table className="kv-table">
               <tbody>
                 {Object.entries(s.health?.subsystems ?? {}).map(([name, info]) => (
                   <tr key={name}>
@@ -137,11 +114,11 @@ export default function ServerDetail({ isAdmin }: { isAdmin: boolean }) {
               </tbody>
             </table>
           )}
-        </div>
+        </Card>
       </div>
 
       {s.drives.length > 0 && (
-        <div className="card table-scroll">
+        <Card title="Drives" flush className="table-scroll" style={{ marginTop: 16 }}>
           <table>
             <thead>
               <tr>
@@ -169,15 +146,13 @@ export default function ServerDetail({ isAdmin }: { isAdmin: boolean }) {
               })}
             </tbody>
           </table>
-        </div>
+        </Card>
       )}
 
       {/* --- networking ------------------------------------------------- */}
-      <h2>Networking</h2>
       <IPTable serverId={id} addresses={s.ip_addresses} onError={setError} />
 
-      <h2>Bandwidth (24h)</h2>
-      <div className="card">
+      <Card title="Bandwidth (24h)">
         {bandwidth.data?.points.length ? (
           <>
             <BandwidthChart series={bandwidth.data.points} />
@@ -193,11 +168,10 @@ export default function ServerDetail({ isAdmin }: { isAdmin: boolean }) {
             No samples yet. Bandwidth is collected from the access switch every five minutes.
           </div>
         )}
-      </div>
+      </Card>
 
       {/* --- history ---------------------------------------------------- */}
-      <h2>Recent jobs</h2>
-      <div className="card" style={{ padding: 0 }}>
+      <Card title="Recent jobs" flush>
         {!jobs.data?.length ? (
           <Empty>Nothing has run on this server yet.</Empty>
         ) : (
@@ -232,7 +206,7 @@ export default function ServerDetail({ isAdmin }: { isAdmin: boolean }) {
             </table>
           </div>
         )}
-      </div>
+      </Card>
 
       {reinstalling && (
         <ReinstallModal
@@ -266,16 +240,15 @@ export default function ServerDetail({ isAdmin }: { isAdmin: boolean }) {
 
 function ActiveJobCard({ job }: { job: Job }) {
   return (
-    <div className="card">
-      <div className="spread" style={{ marginBottom: 10 }}>
+    <Card>
+      <div className="spread" style={{ marginBottom: 8 }}>
         <div>
-          <strong>{job.type.replace(/_/g, ' ')} in progress</strong>
-          <div className="subtle">{job.stage ?? 'starting…'}</div>
+          <strong>{job.type.replace(/_/g, ' ')}</strong> <span className="subtle">— {job.stage ?? 'starting…'}</span>
         </div>
         <Link to={`/jobs/${job.id}`}>View log</Link>
       </div>
-      <Progress value={job.progress} />
-    </div>
+      <Progress value={job.progress} active />
+    </Card>
   )
 }
 
@@ -293,11 +266,7 @@ function IPTable({
   const [rows, setRows] = useState(addresses)
 
   if (!rows.length) {
-    return (
-      <div className="card">
-        <div className="subtle">No addresses assigned yet.</div>
-      </div>
-    )
+    return <Card title="Networking"><div className="subtle">No addresses assigned yet.</div></Card>
   }
 
   async function save(assignmentId: string) {
@@ -313,14 +282,14 @@ function IPTable({
   }
 
   return (
-    <div className="card table-scroll">
+    <Card title="Networking" flush className="table-scroll">
       <table>
         <thead>
           <tr>
             <th>Address</th>
             <th>Gateway</th>
             <th>Reverse DNS</th>
-            <th />
+            <th className="actions" />
           </tr>
         </thead>
         <tbody>
@@ -343,14 +312,15 @@ function IPTable({
                   <span className="mono subtle">{ip.rdns ?? '—'}</span>
                 )}
               </td>
-              <td>
+              <td className="actions">
                 {editing === ip.id ? (
-                  <div className="row">
-                    <button onClick={() => save(ip.id)}>Save</button>
-                    <button onClick={() => setEditing(null)}>Cancel</button>
+                  <div className="row" style={{ justifyContent: 'flex-end' }}>
+                    <button className="sm primary" onClick={() => save(ip.id)}>Save</button>
+                    <button className="sm" onClick={() => setEditing(null)}>Cancel</button>
                   </div>
                 ) : (
                   <button
+                    className="sm"
                     onClick={() => {
                       setEditing(ip.id)
                       setValue(ip.rdns ?? '')
@@ -364,7 +334,7 @@ function IPTable({
           ))}
         </tbody>
       </table>
-    </div>
+    </Card>
   )
 }
 

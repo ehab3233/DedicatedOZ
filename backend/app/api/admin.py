@@ -797,6 +797,7 @@ def _admin_server(db: Session, server: Server) -> AdminServerOut:
             "customer_vlan": server.customer_vlan,
             "provisioning_mac": server.provisioning_mac,
             "last_wiped_at": server.last_wiped_at,
+            "state_changed_at": server.state_changed_at,
             "notes": server.notes,
         }
     )

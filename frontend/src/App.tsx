@@ -1,21 +1,30 @@
 import { Suspense, lazy, useEffect, useState } from 'react'
-import { NavLink, Navigate, Route, Routes, useNavigate } from 'react-router-dom'
+import { Navigate, Route, Routes, useNavigate } from 'react-router-dom'
 import { api, getToken, setToken, type Me } from './api'
-import Login from './pages/Login'
-import Servers from './pages/Servers'
-import ServerDetail from './pages/ServerDetail'
+import { ConfirmProvider } from './components'
+import Shell from './layout/Shell'
 import JobDetail from './pages/JobDetail'
+import Login from './pages/Login'
 import SSHKeys from './pages/SSHKeys'
-import AdminLayout from './pages/admin/AdminLayout'
-import Fleet from './pages/admin/Fleet'
-import ServerAdmin from './pages/admin/ServerAdmin'
-import Customers from './pages/admin/Customers'
-import IPAM from './pages/admin/IPAM'
-import Jobs from './pages/admin/Jobs'
+import ServerDetail from './pages/ServerDetail'
+import Servers from './pages/Servers'
 import Audit from './pages/admin/Audit'
+import Customers from './pages/admin/Customers'
+import Dashboard from './pages/admin/Dashboard'
+import IPAM from './pages/admin/IPAM'
+import Images from './pages/admin/Images'
+import Jobs from './pages/admin/Jobs'
+import Fleet from './pages/admin/Servers'
+import ServerPage from './pages/admin/server/ServerPage'
+import { ToastProvider } from './toast'
 
-// xterm.js is most of the bundle; only the console page needs it.
+// xterm.js is most of the bundle; only the console pages need it.
 const Console = lazy(() => import('./pages/Console'))
+const ConsoleTab = lazy(() => import('./pages/admin/server/ConsoleTab'))
+
+function Loading() {
+  return <main className="page subtle">Loading…</main>
+}
 
 export default function App() {
   const [me, setMe] = useState<Me | null>(null)
@@ -53,48 +62,53 @@ export default function App() {
     navigate('/login')
   }
 
-  const link = ({ isActive }: { isActive: boolean }) => (isActive ? 'active' : '')
+  const home = me.is_admin ? '/admin' : '/servers'
 
   return (
-    <>
-      <header className="topbar">
-        <span className="brand">DedicatedOZ</span>
-        <nav>
-          <NavLink to="/servers" className={link}>Servers</NavLink>
-          <NavLink to="/ssh-keys" className={link}>SSH keys</NavLink>
-          {me.is_admin && <NavLink to="/admin" className={link}>Manage</NavLink>}
-        </nav>
-        <span className="subtle">{me.email}</span>
-        <button onClick={signOut}>Sign out</button>
-      </header>
-
-      <Routes>
-        <Route path="/" element={<Navigate to={me.is_admin ? '/admin' : '/servers'} replace />} />
-        <Route path="/login" element={<Navigate to={me.is_admin ? '/admin' : '/servers'} replace />} />
-        <Route path="/servers" element={<Servers />} />
-        <Route path="/servers/:id" element={<ServerDetail isAdmin={me.is_admin} />} />
-        <Route
-          path="/servers/:id/console"
-          element={
-            <Suspense fallback={<main className="page subtle">Loading console…</main>}>
-              <Console isAdmin={me.is_admin} />
-            </Suspense>
-          }
-        />
-        <Route path="/jobs/:id" element={<JobDetail isAdmin={me.is_admin} />} />
-        <Route path="/ssh-keys" element={<SSHKeys />} />
-        {me.is_admin && (
-          <Route path="/admin" element={<AdminLayout />}>
-            <Route index element={<Fleet />} />
-            <Route path="servers/:id" element={<ServerAdmin />} />
-            <Route path="customers" element={<Customers />} />
-            <Route path="ipam" element={<IPAM />} />
-            <Route path="jobs" element={<Jobs />} />
-            <Route path="audit" element={<Audit />} />
-          </Route>
-        )}
-        <Route path="*" element={<Navigate to="/servers" replace />} />
-      </Routes>
-    </>
+    <ToastProvider>
+      <ConfirmProvider>
+        <Shell me={me} onSignOut={signOut}>
+          <Routes>
+            <Route path="/" element={<Navigate to={home} replace />} />
+            <Route path="/login" element={<Navigate to={home} replace />} />
+            <Route path="/servers" element={<Servers />} />
+            <Route path="/servers/:id" element={<ServerDetail isAdmin={me.is_admin} />} />
+            <Route
+              path="/servers/:id/console"
+              element={
+                <Suspense fallback={<Loading />}>
+                  <Console isAdmin={me.is_admin} />
+                </Suspense>
+              }
+            />
+            <Route path="/jobs/:id" element={<JobDetail isAdmin={me.is_admin} />} />
+            <Route path="/ssh-keys" element={<SSHKeys />} />
+            {me.is_admin && (
+              <>
+                <Route path="/admin" element={<Dashboard />} />
+                <Route path="/admin/servers" element={<Fleet />} />
+                <Route path="/admin/servers/:id" element={<ServerPage />}>
+                  <Route
+                    path="console"
+                    element={
+                      <Suspense fallback={<Loading />}>
+                        <ConsoleTab />
+                      </Suspense>
+                    }
+                  />
+                </Route>
+                <Route path="/admin/servers/:id/:tab" element={<ServerPage />} />
+                <Route path="/admin/images" element={<Images />} />
+                <Route path="/admin/customers" element={<Customers />} />
+                <Route path="/admin/ipam" element={<IPAM />} />
+                <Route path="/admin/jobs" element={<Jobs />} />
+                <Route path="/admin/audit" element={<Audit />} />
+              </>
+            )}
+            <Route path="*" element={<Navigate to={home} replace />} />
+          </Routes>
+        </Shell>
+      </ConfirmProvider>
+    </ToastProvider>
   )
 }

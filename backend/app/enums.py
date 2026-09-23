@@ -70,6 +70,14 @@ class JobType(enum.StrEnum):
     POWER_CYCLE = "power_cycle"
     POWER_RESET = "power_reset"
     BMC_SETUP = "bmc_setup"
+    #: One-time boot device (PXE, disk, CD, BIOS setup), optionally followed
+    #: by a reset or power cycle so it takes effect now.
+    BOOT_OVERRIDE = "boot_override"
+    #: Mount an ISO from the image store as virtual media and boot from it.
+    VMEDIA_BOOT = "vmedia_boot"
+    VMEDIA_EJECT = "vmedia_eject"
+    #: Download an ISO into the image store on the management server.
+    IMAGE_FETCH = "image_fetch"
     INSTALL = "install"
     RESCUE = "rescue"
     WIPE = "wipe"

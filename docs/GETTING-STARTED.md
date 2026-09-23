@@ -226,10 +226,11 @@ Back on the server page → **Assign address** → pick the block, take the firs
 free suggestion, tick **Primary**. The installer will configure this address
 statically, so the server comes up exactly where you expect.
 
-## 7. Test power control and the consoles
+## 7. Test power control, the consoles, and the readings
 
-The **Power** card on the server page reads the power state live from the BMC
-(the badge says which protocol answered and when). The buttons:
+Open the server from **Servers**. The strip under its name reads the power
+state live from the BMC every ten seconds (the badge says which protocol
+answered and when). The buttons:
 
 | Button | What the BMC is asked to do |
 |---|---|
@@ -249,19 +250,65 @@ If a job is holding the server -- a reinstall that hung -- admins get **reset
 anyway** / **force off anyway** under the buttons. It is audited as a forced
 action.
 
-**Serial console.** Click **Open serial console**. The power buttons are on the
-same page, so press **Reset** and watch POST, the BIOS, the boot loader and the
-kernel scroll past, then log in. Keys a browser swallows (F2 setup, F6 boot
-menu, F12 network boot, BREAK) are buttons above the terminal. The BMC allows
-one console viewer; if someone else has it, you are offered **Take over**.
-Idle consoles close after 30 minutes to free the slot.
+**Serial console.** The **Console** tab. The power buttons stay above it, so
+press **Reset** and watch POST, the BIOS, the boot loader and the kernel
+scroll past, then log in. Keys a browser swallows (F2 setup, F6 boot menu,
+F12 network boot, BREAK) are buttons in the toolbar. The BMC allows one
+console viewer; if someone else has it, you are offered **Take over**. Idle
+consoles close after 30 minutes to free the slot. **Full page** opens the
+same console on a page of its own.
 
-**KVM.** **Launch KVM** gets one-time tokens from the CIMC and opens its HTML5
-viewer in a new tab. Your browser talks to the CIMC directly, which works on
-the flat network. Open **CIMC web UI** once first and accept its self-signed
-certificate, or the viewer tab is blocked. If your firmware keeps the viewer
-somewhere unexpected, the panel falls back to the Java launcher and the web UI
-(and `DOZ_KVM_URL_TEMPLATE` pins the path once you know it).
+**KVM.** The **KVM** button gets one-time tokens from the CIMC and opens its
+HTML5 viewer in a new tab: video from POST onwards, keyboard and mouse
+passthrough, and the viewer's own virtual media for an ISO on your machine.
+Your browser talks to the CIMC directly, which works on the flat network.
+Open **CIMC** once first and accept its self-signed certificate, or the
+viewer tab is blocked. If your firmware keeps the viewer somewhere
+unexpected, the panel falls back to the Java launcher and the web UI (and
+`DOZ_KVM_URL_TEMPLATE` pins the path once you know it).
+
+**Sensors.** The **Sensors** tab reads every sensor the BMC has over IPMI:
+temperatures, fans, voltages, PSU output and, where the BMC supports DCMI,
+the power draw. It re-reads every ten seconds while the tab is open, and
+the **Overview** tab shows the hottest sensor, inlet temperature, fan
+average and power draw at the same rate. Nothing here is stored or
+estimated: it is what the BMC answered, with the time it answered.
+
+**Event log.** The **Event log** tab is the BMC's System Event Log: fan
+stalls, thermal trips, PSU events, with the sensor name resolved and the
+reading that triggered it. It refreshes every 30 seconds. **Clear log**
+empties it on the BMC (audited) once the cause is dealt with, so the next
+fault stands out.
+
+**Hardware.** Inventory (CPUs, memory, BIOS, NICs, drives) and health (PSU,
+fans, temperatures, drive predicted failure) come from the BMC on a
+schedule: inventory every 30 minutes, health every 5, both with their age
+shown. **Sync inventory** and **Check health** read them now.
+
+**Boot once from.** On the Overview tab, pick a device (network, first disk,
+CD/virtual media, BIOS setup) and whether to reset, power cycle, power on, or
+only set the flag. BMCs drop the flag about a minute after it is set with no
+restart, so "then reset now" is the default.
+
+**BMC tab.** What the controller says about itself (firmware, IPMI version,
+its own network settings, faults, the power-restore policy, which you can
+change), and the tools: **Prepare BMC**, the locator LED (blink it for a
+minute so remote hands find the box), **Reset BMC** for a CIMC that has
+stopped answering (the host keeps running), and **Rotate** for the IPMI
+password. Rotation sets a new 16-character password on the BMC for the user
+the platform logs in as, proves a fresh session works with it, then stores
+it; the new password is shown once. It needs a writable secrets backend
+(`file`, which the installer sets up, or `vault`).
+
+**Install from an ISO.** Upload an ISO on the **Images** page (any size; it
+streams to disk), have the management server fetch one from a URL, or copy
+files into `installer/assets/iso/` and click **Scan directory**. Then on the
+server: **Install from image** mounts it on the BMC as a virtual CD over
+HTTP, sets a one-time CD boot and power-cycles. Open the **KVM** and drive
+the installer with keyboard and mouse. Virtual media is Redfish, so this
+needs the server on `auto` or `redfish`, not pinned to IPMI. The ISO is
+served from `http://<management-ip>:8080/iso/`; the CIMC must be able to
+reach that address.
 
 With no job waiting, a reset also shows the netboot rail at work on the
 console: PXE fires, iPXE chains to the management server, gets "No
@@ -349,6 +396,10 @@ Honest list, so nobody is surprised:
   CIMC. Customers get the serial console, which goes through the platform;
   giving them KVM needs a proxy in front of the CIMC, which comes with the
   move off the flat network.
+- **Nothing inside the OS is monitored.** CPU load, memory and disk use need
+  an agent in the customer's OS; a BMC cannot see them. What the panel shows
+  is what the BMC can: temperatures, fans, voltages, power draw, PSU and
+  drive health, NIC link.
 - **Bandwidth graphs are empty.** The storage and API exist; the poller that
   reads switch counters does not, for the same reason.
 - **No email.** New-customer passwords are shown to you once in the panel;

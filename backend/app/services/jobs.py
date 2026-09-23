@@ -36,6 +36,9 @@ EXCLUSIVE_JOB_TYPES = {
     JobType.POWER_CYCLE,
     JobType.POWER_RESET,
     JobType.BMC_SETUP,
+    JobType.BOOT_OVERRIDE,
+    JobType.VMEDIA_BOOT,
+    JobType.VMEDIA_EJECT,
 }
 
 
@@ -141,8 +144,12 @@ def transition_job(db: Session, job: Job, target: JobState, *, error: str | None
     return job
 
 
+#: `jobs.stage` is a short label for a progress bar; detail goes in the log.
+STAGE_MAX = 64
+
+
 def set_stage(db: Session, job: Job, stage: str, progress: int | None = None) -> None:
-    job.stage = stage
+    job.stage = stage if len(stage) <= STAGE_MAX else stage[: STAGE_MAX - 1] + "…"
     if progress is not None:
         job.progress = max(0, min(100, progress))
     db.add(job)

@@ -1,13 +1,202 @@
-INFO:     Will watch for changes in these directories: ['/home/user/DedicatedOZ/backend']
-INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
-INFO:     Started reloader process [2280] using WatchFiles
-INFO:     Started server process [2298]
+INFO:     Started server process [25477]
 INFO:     Waiting for application startup.
 INFO:     Application startup complete.
-INFO:     127.0.0.1:41396 - "GET /health HTTP/1.1" 200 OK
-INFO:     127.0.0.1:41400 - "GET /health HTTP/1.1" 200 OK
-INFO:     Shutting down
-INFO:     Waiting for application shutdown.
-INFO:     Application shutdown complete.
-INFO:     Finished server process [2298]
-INFO:     Stopping reloader process [2280]
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+INFO:     127.0.0.1:58866 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58882 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:42368 - "POST /api/v1/auth/login HTTP/1.1" 200 OK
+INFO:     127.0.0.1:42376 - "GET /api/v1/auth/me HTTP/1.1" 200 OK
+INFO:     127.0.0.1:42398 - "GET /api/v1/admin/summary HTTP/1.1" 200 OK
+INFO:     127.0.0.1:42440 - "GET /api/v1/admin/jobs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:42414 - "GET /api/v1/admin/servers HTTP/1.1" 200 OK
+INFO:     127.0.0.1:42388 - "GET /api/v1/admin/system HTTP/1.1" 200 OK
+INFO:     127.0.0.1:42426 - "GET /api/v1/admin/power HTTP/1.1" 200 OK
+INFO:     127.0.0.1:42442 - "GET /api/v1/admin/system HTTP/1.1" 200 OK
+INFO:     127.0.0.1:42458 - "GET /api/v1/admin/servers HTTP/1.1" 200 OK
+INFO:     127.0.0.1:42466 - "GET /api/v1/admin/power HTTP/1.1" 200 OK
+INFO:     127.0.0.1:47746 - "GET /api/v1/admin/subscriptions?server_id=5bd3775d-b2a4-46f6-9623-e764cbe670b9 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:47738 - "GET /api/v1/admin/jobs?server_id=5bd3775d-b2a4-46f6-9623-e764cbe670b9 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:47728 - "GET /api/v1/admin/servers/5bd3775d-b2a4-46f6-9623-e764cbe670b9 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:47752 - "GET /api/v1/servers/5bd3775d-b2a4-46f6-9623-e764cbe670b9/power HTTP/1.1" 200 OK
+INFO:     127.0.0.1:47762 - "GET /api/v1/admin/servers/5bd3775d-b2a4-46f6-9623-e764cbe670b9/sensors HTTP/1.1" 200 OK
+INFO:     127.0.0.1:47776 - "POST /api/v1/admin/servers/5bd3775d-b2a4-46f6-9623-e764cbe670b9/boot HTTP/1.1" 202 Accepted
+INFO:     127.0.0.1:47794 - "GET /api/v1/admin/jobs?server_id=5bd3775d-b2a4-46f6-9623-e764cbe670b9 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:47800 - "GET /api/v1/admin/subscriptions?server_id=5bd3775d-b2a4-46f6-9623-e764cbe670b9 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:47782 - "GET /api/v1/admin/servers/5bd3775d-b2a4-46f6-9623-e764cbe670b9 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:47802 - "GET /api/v1/jobs/3c094a94-3473-4b10-a07e-2bd26461a0e0 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:47814 - "GET /api/v1/admin/subscriptions?server_id=5bd3775d-b2a4-46f6-9623-e764cbe670b9 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:47812 - "GET /api/v1/admin/jobs?server_id=5bd3775d-b2a4-46f6-9623-e764cbe670b9 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:47804 - "GET /api/v1/admin/servers/5bd3775d-b2a4-46f6-9623-e764cbe670b9 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:34732 - "GET /api/v1/admin/servers/5bd3775d-b2a4-46f6-9623-e764cbe670b9/sensors HTTP/1.1" 200 OK
+INFO:     127.0.0.1:34742 - "GET /api/v1/admin/servers/5bd3775d-b2a4-46f6-9623-e764cbe670b9/sel HTTP/1.1" 200 OK
+INFO:     127.0.0.1:34752 - "GET /api/v1/servers/5bd3775d-b2a4-46f6-9623-e764cbe670b9/power HTTP/1.1" 200 OK
+INFO:     127.0.0.1:34754 - "GET /api/v1/admin/servers/5bd3775d-b2a4-46f6-9623-e764cbe670b9/bmc/info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:34798 - "GET /api/v1/admin/servers/5bd3775d-b2a4-46f6-9623-e764cbe670b9/vmedia HTTP/1.1" 200 OK
+INFO:     127.0.0.1:34782 - "GET /api/v1/admin/servers/5bd3775d-b2a4-46f6-9623-e764cbe670b9/bmc/info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:34770 - "GET /api/v1/admin/servers/5bd3775d-b2a4-46f6-9623-e764cbe670b9/bmc HTTP/1.1" 200 OK
+INFO:     127.0.0.1:34800 - "POST /api/v1/admin/servers/5bd3775d-b2a4-46f6-9623-e764cbe670b9/identify HTTP/1.1" 200 OK
+INFO:     127.0.0.1:34808 - "POST /api/v1/admin/servers/5bd3775d-b2a4-46f6-9623-e764cbe670b9/bmc/power-policy HTTP/1.1" 502 Bad Gateway
+INFO:     127.0.0.1:34812 - "GET /api/v1/admin/servers/5bd3775d-b2a4-46f6-9623-e764cbe670b9/bmc/info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:34822 - "POST /api/v1/admin/servers/5bd3775d-b2a4-46f6-9623-e764cbe670b9/bmc/password HTTP/1.1" 409 Conflict
+INFO:     127.0.0.1:46580 - "GET /api/v1/servers/5bd3775d-b2a4-46f6-9623-e764cbe670b9/power HTTP/1.1" 200 OK
+INFO:     127.0.0.1:46592 - "POST /api/v1/console/5bd3775d-b2a4-46f6-9623-e764cbe670b9/ticket HTTP/1.1" 200 OK
+INFO:     127.0.0.1:46596 - "WebSocket /api/v1/console/5bd3775d-b2a4-46f6-9623-e764cbe670b9/sol?ticket=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ0eXAiOiJjb25zb2xlIiwic3ViIjoiMDU2YWJhMGItN2M3MS00MTQwLWJhN2QtYTViMmM4NmZiNzQzIiwic3J2IjoiNWJkMzc3NWQtYjJhNC00NmY2LTk2MjMtZTc2NGNiZTY3MGI5IiwianRpIjoiWHE5R09xeEx3RzB5M0JheiIsImlhdCI6MTc5MDE3MjcxMCwiZXhwIjoxNzkwMTcyNzcwfQ.7bgJ93Zi67rtM6xLYmVVlSIICfb-tHXhUm0yIFb8aoQ" [accepted]
+INFO:     connection open
+INFO:     127.0.0.1:46600 - "POST /api/v1/admin/servers/5bd3775d-b2a4-46f6-9623-e764cbe670b9/kvm HTTP/1.1" 502 Bad Gateway
+INFO:     127.0.0.1:46614 - "GET /api/v1/admin/images HTTP/1.1" 200 OK
+INFO:     127.0.0.1:46624 - "PUT /api/v1/admin/images/upload?filename=test-rescue.iso&name=Test+rescue+ISO HTTP/1.1" 201 Created
+INFO:     127.0.0.1:46638 - "GET /api/v1/admin/images HTTP/1.1" 200 OK
+INFO:     127.0.0.1:46650 - "POST /api/v1/admin/images/fetch HTTP/1.1" 202 Accepted
+INFO:     127.0.0.1:46656 - "GET /api/v1/admin/images HTTP/1.1" 200 OK
+INFO:     127.0.0.1:46664 - "GET /api/v1/jobs/2664cff2-dc56-4d97-a06c-a78a2853b0d6 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57344 - "GET /api/v1/admin/images HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57346 - "POST /api/v1/admin/images/scan HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57350 - "GET /api/v1/admin/images HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57352 - "GET /api/v1/auth/me HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57358 - "GET /api/v1/admin/servers HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57368 - "GET /api/v1/admin/servers/5bd3775d-b2a4-46f6-9623-e764cbe670b9 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57372 - "GET /api/v1/admin/jobs?server_id=5bd3775d-b2a4-46f6-9623-e764cbe670b9 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57388 - "GET /api/v1/admin/subscriptions?server_id=5bd3775d-b2a4-46f6-9623-e764cbe670b9 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57398 - "GET /api/v1/servers/5bd3775d-b2a4-46f6-9623-e764cbe670b9/power HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57406 - "GET /api/v1/admin/images HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57404 - "GET /api/v1/admin/servers/5bd3775d-b2a4-46f6-9623-e764cbe670b9/sensors HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57356 - "GET /api/v1/admin/system HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57364 - "GET /api/v1/admin/power HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49178 - "GET /api/v1/servers/5bd3775d-b2a4-46f6-9623-e764cbe670b9/power HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49180 - "GET /api/v1/admin/servers/5bd3775d-b2a4-46f6-9623-e764cbe670b9/sensors HTTP/1.1" 200 OK
+INFO:     127.0.0.1:44460 - "GET /api/v1/servers/5bd3775d-b2a4-46f6-9623-e764cbe670b9/power HTTP/1.1" 200 OK
+INFO:     127.0.0.1:44466 - "GET /api/v1/admin/servers/5bd3775d-b2a4-46f6-9623-e764cbe670b9/sensors HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53680 - "GET /api/v1/admin/subscriptions?server_id=5bd3775d-b2a4-46f6-9623-e764cbe670b9 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53658 - "GET /api/v1/admin/servers/5bd3775d-b2a4-46f6-9623-e764cbe670b9 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53674 - "GET /api/v1/admin/jobs?server_id=5bd3775d-b2a4-46f6-9623-e764cbe670b9 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53694 - "GET /api/v1/servers/5bd3775d-b2a4-46f6-9623-e764cbe670b9/power HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53698 - "GET /api/v1/admin/servers/5bd3775d-b2a4-46f6-9623-e764cbe670b9/sensors HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33128 - "POST /api/v1/auth/login HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33134 - "GET /api/v1/auth/me HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33192 - "GET /api/v1/admin/jobs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33174 - "GET /api/v1/admin/servers HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33164 - "GET /api/v1/admin/summary HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33148 - "GET /api/v1/admin/system HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33208 - "GET /api/v1/admin/system HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33182 - "GET /api/v1/admin/power HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33222 - "GET /api/v1/admin/servers HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33234 - "GET /api/v1/admin/power HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51370 - "GET /api/v1/admin/servers/5bd3775d-b2a4-46f6-9623-e764cbe670b9 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51376 - "GET /api/v1/admin/jobs?server_id=5bd3775d-b2a4-46f6-9623-e764cbe670b9 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51388 - "GET /api/v1/admin/subscriptions?server_id=5bd3775d-b2a4-46f6-9623-e764cbe670b9 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51400 - "GET /api/v1/servers/5bd3775d-b2a4-46f6-9623-e764cbe670b9/power HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51408 - "GET /api/v1/admin/servers/5bd3775d-b2a4-46f6-9623-e764cbe670b9/sensors HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51420 - "POST /api/v1/admin/servers/5bd3775d-b2a4-46f6-9623-e764cbe670b9/boot HTTP/1.1" 202 Accepted
+INFO:     127.0.0.1:51440 - "GET /api/v1/admin/jobs?server_id=5bd3775d-b2a4-46f6-9623-e764cbe670b9 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51452 - "GET /api/v1/admin/subscriptions?server_id=5bd3775d-b2a4-46f6-9623-e764cbe670b9 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51434 - "GET /api/v1/admin/servers/5bd3775d-b2a4-46f6-9623-e764cbe670b9 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51460 - "GET /api/v1/jobs/7168fcb3-265d-43e3-80bf-6dea5896d0bf HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51470 - "GET /api/v1/admin/servers/5bd3775d-b2a4-46f6-9623-e764cbe670b9 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51484 - "GET /api/v1/admin/jobs?server_id=5bd3775d-b2a4-46f6-9623-e764cbe670b9 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51496 - "GET /api/v1/admin/subscriptions?server_id=5bd3775d-b2a4-46f6-9623-e764cbe670b9 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:41016 - "GET /api/v1/admin/servers/5bd3775d-b2a4-46f6-9623-e764cbe670b9/sensors HTTP/1.1" 200 OK
+INFO:     127.0.0.1:41024 - "GET /api/v1/admin/servers/5bd3775d-b2a4-46f6-9623-e764cbe670b9/sel HTTP/1.1" 200 OK
+INFO:     127.0.0.1:41038 - "GET /api/v1/servers/5bd3775d-b2a4-46f6-9623-e764cbe670b9/power HTTP/1.1" 200 OK
+INFO:     127.0.0.1:41042 - "GET /api/v1/admin/servers/5bd3775d-b2a4-46f6-9623-e764cbe670b9/bmc/info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:41090 - "GET /api/v1/admin/servers/5bd3775d-b2a4-46f6-9623-e764cbe670b9/bmc/info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:41074 - "GET /api/v1/admin/servers/5bd3775d-b2a4-46f6-9623-e764cbe670b9/vmedia HTTP/1.1" 200 OK
+INFO:     127.0.0.1:41058 - "GET /api/v1/admin/servers/5bd3775d-b2a4-46f6-9623-e764cbe670b9/bmc HTTP/1.1" 200 OK
+INFO:     127.0.0.1:41092 - "POST /api/v1/admin/servers/5bd3775d-b2a4-46f6-9623-e764cbe670b9/identify HTTP/1.1" 200 OK
+INFO:     127.0.0.1:41098 - "POST /api/v1/admin/servers/5bd3775d-b2a4-46f6-9623-e764cbe670b9/bmc/power-policy HTTP/1.1" 502 Bad Gateway
+INFO:     127.0.0.1:41114 - "GET /api/v1/admin/servers/5bd3775d-b2a4-46f6-9623-e764cbe670b9/bmc/info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:41118 - "POST /api/v1/admin/servers/5bd3775d-b2a4-46f6-9623-e764cbe670b9/bmc/password HTTP/1.1" 409 Conflict
+INFO:     127.0.0.1:36886 - "GET /api/v1/servers/5bd3775d-b2a4-46f6-9623-e764cbe670b9/power HTTP/1.1" 200 OK
+INFO:     127.0.0.1:36888 - "POST /api/v1/console/5bd3775d-b2a4-46f6-9623-e764cbe670b9/ticket HTTP/1.1" 200 OK
+INFO:     127.0.0.1:36902 - "WebSocket /api/v1/console/5bd3775d-b2a4-46f6-9623-e764cbe670b9/sol?ticket=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ0eXAiOiJjb25zb2xlIiwic3ViIjoiMDU2YWJhMGItN2M3MS00MTQwLWJhN2QtYTViMmM4NmZiNzQzIiwic3J2IjoiNWJkMzc3NWQtYjJhNC00NmY2LTk2MjMtZTc2NGNiZTY3MGI5IiwianRpIjoidjloVUVTdEkyWEVnZHBaNCIsImlhdCI6MTc5MDE3MjgwOSwiZXhwIjoxNzkwMTcyODY5fQ.XQQmj7qxLeRgtMFqrar7Fh_gahlSrmi3o_KjwmFuEUY" [accepted]
+INFO:     connection open
+INFO:     127.0.0.1:36916 - "POST /api/v1/admin/servers/5bd3775d-b2a4-46f6-9623-e764cbe670b9/kvm HTTP/1.1" 502 Bad Gateway
+INFO:     127.0.0.1:36926 - "GET /api/v1/admin/images HTTP/1.1" 200 OK
+INFO:     127.0.0.1:36940 - "PUT /api/v1/admin/images/upload?filename=test-rescue.iso&name=Test+rescue+ISO HTTP/1.1" 201 Created
+INFO:     127.0.0.1:36954 - "GET /api/v1/admin/images HTTP/1.1" 200 OK
+INFO:     127.0.0.1:36968 - "POST /api/v1/admin/images/fetch HTTP/1.1" 202 Accepted
+INFO:     127.0.0.1:36974 - "GET /api/v1/admin/images HTTP/1.1" 200 OK
+INFO:     127.0.0.1:36986 - "POST /api/v1/admin/images/scan HTTP/1.1" 200 OK
+INFO:     127.0.0.1:36996 - "GET /api/v1/admin/images HTTP/1.1" 200 OK
+INFO:     127.0.0.1:37012 - "GET /api/v1/auth/me HTTP/1.1" 200 OK
+INFO:     127.0.0.1:37044 - "GET /api/v1/admin/servers HTTP/1.1" 200 OK
+INFO:     127.0.0.1:37094 - "GET /api/v1/admin/subscriptions?server_id=5bd3775d-b2a4-46f6-9623-e764cbe670b9 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:37086 - "GET /api/v1/admin/jobs?server_id=5bd3775d-b2a4-46f6-9623-e764cbe670b9 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:37074 - "GET /api/v1/admin/servers/5bd3775d-b2a4-46f6-9623-e764cbe670b9 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:37108 - "GET /api/v1/servers/5bd3775d-b2a4-46f6-9623-e764cbe670b9/power HTTP/1.1" 200 OK
+INFO:     127.0.0.1:37124 - "GET /api/v1/admin/servers/5bd3775d-b2a4-46f6-9623-e764cbe670b9/sensors HTTP/1.1" 200 OK
+INFO:     127.0.0.1:37138 - "GET /api/v1/admin/images HTTP/1.1" 200 OK
+INFO:     127.0.0.1:37140 - "POST /api/v1/admin/servers/5bd3775d-b2a4-46f6-9623-e764cbe670b9/vmedia/boot HTTP/1.1" 202 Accepted
+INFO:     127.0.0.1:37028 - "GET /api/v1/admin/system HTTP/1.1" 200 OK
+INFO:     127.0.0.1:37058 - "GET /api/v1/admin/power HTTP/1.1" 200 OK
+INFO:     127.0.0.1:38586 - "GET /api/v1/jobs/2bba4e49-4dd9-42c4-a377-5191e6c350a7 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:38602 - "GET /api/v1/admin/jobs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:38604 - "GET /api/v1/admin/servers HTTP/1.1" 200 OK
+INFO:     127.0.0.1:38612 - "GET /api/v1/admin/audit?limit=200 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:38628 - "GET /api/v1/admin/ip-blocks HTTP/1.1" 200 OK
+INFO:     127.0.0.1:38634 - "GET /api/v1/admin/customers HTTP/1.1" 200 OK
+INFO:     127.0.0.1:38640 - "GET /api/v1/auth/me HTTP/1.1" 200 OK
+INFO:     127.0.0.1:38706 - "GET /api/v1/admin/jobs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:38672 - "GET /api/v1/admin/summary HTTP/1.1" 200 OK
+INFO:     127.0.0.1:38686 - "GET /api/v1/admin/servers HTTP/1.1" 200 OK
+INFO:     127.0.0.1:38698 - "GET /api/v1/admin/power HTTP/1.1" 200 OK
+INFO:     127.0.0.1:38656 - "GET /api/v1/admin/system HTTP/1.1" 200 OK
+INFO:     127.0.0.1:38720 - "GET /api/v1/admin/system HTTP/1.1" 200 OK
+INFO:     127.0.0.1:38736 - "GET /api/v1/auth/me HTTP/1.1" 200 OK
+INFO:     127.0.0.1:38750 - "GET /api/v1/admin/servers/5bd3775d-b2a4-46f6-9623-e764cbe670b9 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:38762 - "GET /api/v1/admin/jobs?server_id=5bd3775d-b2a4-46f6-9623-e764cbe670b9 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:38774 - "GET /api/v1/admin/subscriptions?server_id=5bd3775d-b2a4-46f6-9623-e764cbe670b9 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:38776 - "GET /api/v1/servers/5bd3775d-b2a4-46f6-9623-e764cbe670b9/power HTTP/1.1" 200 OK
+INFO:     127.0.0.1:38778 - "GET /api/v1/admin/servers/5bd3775d-b2a4-46f6-9623-e764cbe670b9/sensors HTTP/1.1" 200 OK
+INFO:     127.0.0.1:38792 - "GET /api/v1/auth/me HTTP/1.1" 200 OK
+INFO:     127.0.0.1:38810 - "GET /api/v1/servers/5bd3775d-b2a4-46f6-9623-e764cbe670b9/power HTTP/1.1" 200 OK
+INFO:     127.0.0.1:38812 - "POST /api/v1/console/5bd3775d-b2a4-46f6-9623-e764cbe670b9/ticket HTTP/1.1" 200 OK
+INFO:     127.0.0.1:38820 - "WebSocket /api/v1/console/5bd3775d-b2a4-46f6-9623-e764cbe670b9/sol?ticket=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ0eXAiOiJjb25zb2xlIiwic3ViIjoiMDU2YWJhMGItN2M3MS00MTQwLWJhN2QtYTViMmM4NmZiNzQzIiwic3J2IjoiNWJkMzc3NWQtYjJhNC00NmY2LTk2MjMtZTc2NGNiZTY3MGI5IiwianRpIjoiSXZZM1VYc25hZkVIRE9wZCIsImlhdCI6MTc5MDE3MjgyMSwiZXhwIjoxNzkwMTcyODgxfQ.4OxlPn7Qpj21HSoul7r5D9PHZfsg7fRB6olCpwdc_lM" [accepted]
+INFO:     connection open
+INFO:     127.0.0.1:38740 - "GET /api/v1/admin/system HTTP/1.1" 200 OK
+INFO:     127.0.0.1:38836 - "GET /api/v1/auth/me HTTP/1.1" 200 OK
+INFO:     127.0.0.1:38862 - "GET /api/v1/admin/servers HTTP/1.1" 200 OK
+INFO:     127.0.0.1:38870 - "GET /api/v1/admin/power HTTP/1.1" 200 OK
+INFO:     127.0.0.1:38806 - "GET /api/v1/admin/system HTTP/1.1" 200 OK
+INFO:     127.0.0.1:38850 - "GET /api/v1/admin/system HTTP/1.1" 200 OK
+INFO:     127.0.0.1:42636 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:42650 - "POST /api/v1/auth/login HTTP/1.1" 200 OK
+INFO:     127.0.0.1:42660 - "GET /api/v1/admin/system HTTP/1.1" 200 OK
+INFO:     127.0.0.1:42672 - "GET /api/v1/admin/servers HTTP/1.1" 200 OK
+INFO:     127.0.0.1:42682 - "GET /api/v1/servers/5bd3775d-b2a4-46f6-9623-e764cbe670b9/power?fresh=1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:42692 - "POST /api/v1/servers/5bd3775d-b2a4-46f6-9623-e764cbe670b9/power HTTP/1.1" 202 Accepted
+INFO:     127.0.0.1:42704 - "GET /api/v1/admin/jobs/2ed59bcc-a991-439f-b4d1-e4df89be5e09 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:42712 - "GET /api/v1/admin/jobs/2ed59bcc-a991-439f-b4d1-e4df89be5e09 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:42726 - "GET /api/v1/servers/5bd3775d-b2a4-46f6-9623-e764cbe670b9/power?fresh=1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:42732 - "POST /api/v1/servers/5bd3775d-b2a4-46f6-9623-e764cbe670b9/power HTTP/1.1" 202 Accepted
+INFO:     127.0.0.1:42742 - "GET /api/v1/admin/jobs/d7037bbe-ad79-4383-998d-d7237e36f76d HTTP/1.1" 200 OK
+INFO:     127.0.0.1:42746 - "GET /api/v1/admin/jobs/d7037bbe-ad79-4383-998d-d7237e36f76d HTTP/1.1" 200 OK
+INFO:     127.0.0.1:42748 - "GET /api/v1/servers/5bd3775d-b2a4-46f6-9623-e764cbe670b9/power?fresh=1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:42756 - "POST /api/v1/servers/5bd3775d-b2a4-46f6-9623-e764cbe670b9/power HTTP/1.1" 202 Accepted
+INFO:     127.0.0.1:42768 - "GET /api/v1/admin/jobs/182bb77f-a040-4d86-8455-bc3313c36869 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:42772 - "GET /api/v1/admin/jobs/182bb77f-a040-4d86-8455-bc3313c36869 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:42774 - "GET /api/v1/servers/5bd3775d-b2a4-46f6-9623-e764cbe670b9/power?fresh=1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:42780 - "POST /api/v1/servers/5bd3775d-b2a4-46f6-9623-e764cbe670b9/power HTTP/1.1" 202 Accepted
+INFO:     127.0.0.1:42786 - "GET /api/v1/admin/jobs/78be23a6-dc44-4ee5-a3b2-d1c9480bda7a HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54872 - "GET /api/v1/admin/jobs/78be23a6-dc44-4ee5-a3b2-d1c9480bda7a HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54888 - "GET /api/v1/admin/jobs/78be23a6-dc44-4ee5-a3b2-d1c9480bda7a HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54890 - "GET /api/v1/admin/jobs/78be23a6-dc44-4ee5-a3b2-d1c9480bda7a HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54906 - "GET /api/v1/admin/jobs/78be23a6-dc44-4ee5-a3b2-d1c9480bda7a HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54914 - "GET /api/v1/admin/jobs/78be23a6-dc44-4ee5-a3b2-d1c9480bda7a HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54924 - "GET /api/v1/admin/jobs/78be23a6-dc44-4ee5-a3b2-d1c9480bda7a HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54940 - "GET /api/v1/admin/jobs/78be23a6-dc44-4ee5-a3b2-d1c9480bda7a HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54946 - "GET /api/v1/admin/jobs/78be23a6-dc44-4ee5-a3b2-d1c9480bda7a HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54960 - "GET /api/v1/admin/jobs/78be23a6-dc44-4ee5-a3b2-d1c9480bda7a HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54976 - "GET /api/v1/admin/jobs/78be23a6-dc44-4ee5-a3b2-d1c9480bda7a HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54986 - "GET /api/v1/admin/jobs/78be23a6-dc44-4ee5-a3b2-d1c9480bda7a HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54994 - "GET /api/v1/servers/5bd3775d-b2a4-46f6-9623-e764cbe670b9/power?fresh=1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55008 - "GET /api/v1/admin/servers/5bd3775d-b2a4-46f6-9623-e764cbe670b9/sensors?fresh=1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55024 - "GET /api/v1/admin/servers/5bd3775d-b2a4-46f6-9623-e764cbe670b9/sel?fresh=1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55036 - "GET /api/v1/admin/servers/5bd3775d-b2a4-46f6-9623-e764cbe670b9/bmc/info?fresh=1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55050 - "POST /api/v1/admin/servers/5bd3775d-b2a4-46f6-9623-e764cbe670b9/identify HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55062 - "GET /api/v1/admin/power HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55064 - "POST /api/v1/admin/servers/5bd3775d-b2a4-46f6-9623-e764cbe670b9/boot HTTP/1.1" 202 Accepted
+INFO:     127.0.0.1:55078 - "GET /api/v1/admin/jobs/22a8b908-a825-432f-95e6-7fa2c98ac532 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55090 - "GET /api/v1/admin/jobs/22a8b908-a825-432f-95e6-7fa2c98ac532 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55102 - "POST /api/v1/console/5bd3775d-b2a4-46f6-9623-e764cbe670b9/ticket HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55106 - "WebSocket /api/v1/console/5bd3775d-b2a4-46f6-9623-e764cbe670b9/sol?ticket=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ0eXAiOiJjb25zb2xlIiwic3ViIjoiMDU2YWJhMGItN2M3MS00MTQwLWJhN2QtYTViMmM4NmZiNzQzIiwic3J2IjoiNWJkMzc3NWQtYjJhNC00NmY2LTk2MjMtZTc2NGNiZTY3MGI5IiwianRpIjoiZDh3d19SdXlZWlFFNTAyaSIsImlhdCI6MTc5MDE3MzA2NCwiZXhwIjoxNzkwMTczMTI0fQ.M87c0XeXEbwQlPk8py_bRep1nHcIcj_7VAoKlUY35gQ&force=1" [accepted]
+INFO:     connection open

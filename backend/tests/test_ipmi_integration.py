@@ -339,3 +339,210 @@ class TestConsoleBridge:
         assert asyncio.run(use(other.id)) == "refused"      # wrong server
         assert asyncio.run(use(sim_server.id)) == "accepted"
         assert asyncio.run(use(sim_server.id)) == "refused"  # replay
+
+
+# ---------------------------------------------------------------------------
+# Sensors, event log, chassis and BMC administration against the simulator
+# ---------------------------------------------------------------------------
+
+
+def _sim_events(sim) -> None:
+    subprocess.run(
+        [str(RUN_SIM), "events", "--state", str(sim["state"]), "--port", str(sim["port"]),
+         "--password", PASSWORD],
+        env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin"}, check=True, capture_output=True,
+        timeout=60,
+    )
+
+
+class TestSensorsAndEvents:
+    def test_sensors_come_back_with_values_units_and_state(self, sim):
+        sensors = {s["name"]: s for s in driver(sim).sensors()}
+        assert len(sensors) == 12
+        cpu = sensors["CPU1 Temp"]
+        assert cpu["value"] == 47.0 and cpu["unit"] == "°C" and cpu["kind"] == "temperature"
+        assert cpu["status"] == "ok" and cpu["number"] == 0x30
+        assert sensors["FAN1 Tach"]["value"] == 4200.0 and sensors["FAN1 Tach"]["unit"] == "RPM"
+        assert sensors["P12V"]["value"] == 12.1 and sensors["P12V"]["kind"] == "voltage"
+        assert sensors["PSU1 Power"]["unit"] == "W" and sensors["PSU1 Power"]["kind"] == "power"
+
+    def test_no_dcmi_means_no_power_reading_not_a_crash(self, sim):
+        assert driver(sim).power_reading() is None
+
+    def test_event_log_lists_and_clears(self, sim):
+        d = driver(sim)
+        d.sel_clear()
+        _sim_events(sim)
+        entries = d.sel_entries()
+        assert len(entries) == 3
+        assert entries[0]["sensor"] == "Temperature Inlet Temp"
+        assert entries[0]["severity"] == "warning"
+        assert entries[1]["sensor"] == "Fan FAN1 Tach" and entries[1]["severity"] == "critical"
+        assert entries[2]["direction"] == "Deasserted" and entries[2]["severity"] == "info"
+        assert d.sel_info()["entries"] == 3
+        d.sel_clear()
+        assert d.sel_entries() == [] and d.sel_info()["entries"] == 0
+
+
+class TestBmcAdministration:
+    def test_chassis_lan_and_controller_info(self, sim):
+        d = driver(sim)
+        chassis = d.chassis_status()
+        assert chassis["system_power"] in {"on", "off"}
+        assert chassis["power_restore_policy"] == "always-off"
+        assert d.lan_config()["mac_address"]
+        mc = d.mc_info()
+        assert mc["ipmi_version"] == "2.0" and mc["firmware"] and mc["available"]
+
+    def test_identify_led(self, sim):
+        d = driver(sim)
+        d.identify(5)
+        d.identify(0)
+
+    def test_unsupported_power_policy_is_reported_not_faked(self, sim):
+        with pytest.raises(BMCError, match="Invalid command"):
+            driver(sim).set_power_restore_policy("previous")
+
+    def test_password_rotation_round_trip(self, sim):
+        """Change the admin password over IPMI, prove the new one works and the
+        old one does not, then put it back for the rest of the module."""
+        d = driver(sim)
+        users = {u["name"]: u for u in d.users()}
+        assert users["admin"]["privilege"] == "ADMINISTRATOR"
+        user_id = d.user_id_for("admin")
+        assert user_id == 2
+
+        new_password = "Rot4ted-Passw0rd"
+        d.set_user_password(user_id, new_password)
+        rotated = IpmiDriver("127.0.0.1", BMCCredential("admin", new_password),
+                             port=sim["port"], retransmit=(1, 1), timeout=15)
+        try:
+            assert rotated.power_status().state in {"on", "off"}
+            with pytest.raises(BMCError):
+                IpmiDriver("127.0.0.1", BMCCredential("admin", PASSWORD), port=sim["port"],
+                           retransmit=(1, 1), timeout=15).power_status()
+        finally:
+            rotated.set_user_password(user_id, PASSWORD)
+        assert driver(sim).power_status().state in {"on", "off"}
+
+    def test_password_length_is_checked_before_touching_the_bmc(self, sim):
+        with pytest.raises(ValueError, match="1 to 16"):
+            driver(sim).set_user_password(2, "x" * 17)
+
+
+class TestBootOverrideJobs:
+    def test_pxe_then_reset_reboots_into_the_network(self, db, sim, sim_server):
+        from app.services import jobs as job_service
+        from app.workers.tasks import boot_override_task
+
+        driver(sim).power(PowerAction.ON)
+        before = (sim["state"] / "booted").read_text()
+        time.sleep(1.1)
+        job, _ = job_service.create_job(db, job_type=JobType.BOOT_OVERRIDE, server_id=sim_server.id,
+                                        payload={"device": "pxe", "then": "reset"})
+        db.commit()
+        boot_override_task(str(job.id))
+
+        db.expire_all()
+        job = db.get(type(job), job.id)
+        assert job.state == JobState.SUCCEEDED, job.error
+        assert job.result == {"device": "pxe", "then": "reset", "via": "ipmi",
+                              "power_state": "on", "reached_target": True}
+        assert (sim["state"] / "boot").read_text().strip() == "pxe"
+        assert (sim["state"] / "booted").read_text() != before
+
+    def test_bios_setup_flag_only(self, db, sim, sim_server):
+        from app.services import jobs as job_service
+        from app.workers.tasks import boot_override_task
+
+        job, _ = job_service.create_job(db, job_type=JobType.BOOT_OVERRIDE, server_id=sim_server.id,
+                                        payload={"device": "bios", "then": "none"})
+        db.commit()
+        boot_override_task(str(job.id))
+        db.expire_all()
+        job = db.get(type(job), job.id)
+        assert job.state == JobState.SUCCEEDED, job.error
+        assert (sim["state"] / "boot").read_text().strip() == "bios"
+        driver(sim).clear_boot_override()
+
+
+class TestLiveAdminApi:
+    """The endpoints the panel polls, end to end: API -> ipmitool -> simulator."""
+
+    @pytest.fixture
+    def admin_headers(self, client, make_customer, auth_header):
+        return auth_header(make_customer("admin@example.com", admin=True))
+
+    def test_sensors_endpoint(self, client, sim_server, admin_headers):
+        from app.services import bmc_status
+
+        bmc_status._live.clear()
+        body = client.get(f"/api/v1/admin/servers/{sim_server.id}/sensors",
+                          headers=admin_headers).json()
+        assert body["via"] == "ipmi" and len(body["sensors"]) == 12 and body["power"] is None
+        assert {s["name"] for s in body["sensors"] if s["kind"] == "temperature"} == {
+            "CPU1 Temp", "CPU2 Temp", "Inlet Temp", "DIMM Temp"}
+
+    def test_event_log_endpoint(self, client, sim, sim_server, admin_headers):
+        from app.services import bmc_status
+
+        driver(sim).sel_clear()
+        _sim_events(sim)
+        bmc_status._live.clear()
+        body = client.get(f"/api/v1/admin/servers/{sim_server.id}/sel",
+                          headers=admin_headers).json()
+        assert body["info"]["entries"] == 3 and body["entries"][0]["direction"] == "Deasserted"
+        assert client.delete(f"/api/v1/admin/servers/{sim_server.id}/sel",
+                             headers=admin_headers).json()["entries_removed"] == 3
+
+    def test_bmc_info_and_identify_endpoints(self, client, sim_server, admin_headers):
+        from app.services import bmc_status
+
+        bmc_status._live.clear()
+        info = client.get(f"/api/v1/admin/servers/{sim_server.id}/bmc/info",
+                          headers=admin_headers).json()
+        assert info["mc"]["ipmi_version"] == "2.0"
+        assert [u["name"] for u in info["users"]] == ["admin"]
+        led = client.post(f"/api/v1/admin/servers/{sim_server.id}/identify", json={"seconds": 3},
+                          headers=admin_headers)
+        assert led.status_code == 200 and led.json() == {"led": "3s"}
+
+    def test_fleet_power_endpoint(self, client, sim_server, admin_headers):
+        from app.services import bmc_status
+
+        bmc_status.forget(sim_server.id)
+        body = client.get("/api/v1/admin/power", headers=admin_headers).json()
+        mine = body["servers"][str(sim_server.id)]
+        assert mine["state"] in {"on", "off"} and mine["via"] == "ipmi"
+
+    def test_password_rotation_endpoint_with_a_writable_backend(
+        self, client, sim, sim_server, admin_headers, tmp_path, monkeypatch
+    ):
+        from app import secrets as secrets_module
+        from app.api import admin_bmc
+        from app.services import bmc_status
+
+        # Switch to the file backend for this test so the platform can store
+        # the new password, seeding it with the current one.
+        monkeypatch.setattr(secrets_module.settings, "secrets_backend", "file")
+        monkeypatch.setattr(secrets_module.settings, "secrets_file_dir", str(tmp_path))
+        secrets_module.get_secrets_backend.cache_clear()
+        monkeypatch.setattr(admin_bmc.settings, "secrets_backend", "file")
+        backend = secrets_module.get_secrets_backend()
+        backend.put_bmc_credential(sim_server.cimc_credential_ref,
+                                   BMCCredential("admin", PASSWORD))
+        try:
+            body = client.post(f"/api/v1/admin/servers/{sim_server.id}/bmc/password", json={},
+                               headers=admin_headers).json()
+            assert body["verified"] and body["stored"] and body["error"] is None, body
+            stored = backend.get_bmc_credential(sim_server.cimc_credential_ref)
+            assert stored.password == body["password"] != PASSWORD
+            # The platform now authenticates with the stored password.
+            bmc_status.forget(sim_server.id)
+            power = client.get(f"/api/v1/servers/{sim_server.id}/power?fresh=1",
+                               headers=admin_headers).json()
+            assert power["state"] in {"on", "off"} and power["via"] == "ipmi"
+        finally:
+            IpmiDriver("127.0.0.1", BMCCredential("admin", body["password"]),
+                       port=sim["port"]).set_user_password(2, PASSWORD)
+            secrets_module.get_secrets_backend.cache_clear()

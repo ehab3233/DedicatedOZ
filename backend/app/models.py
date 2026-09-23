@@ -334,6 +334,35 @@ class OSTemplate(Base, TimestampMixin):
 
 
 # ---------------------------------------------------------------------------
+# Image store
+# ---------------------------------------------------------------------------
+
+
+class Image(Base, TimestampMixin):
+    """An ISO on the management server, for virtual-media installs.
+
+    The file lives under `settings.image_dir`, which nginx serves on the boot
+    asset port; `filename` is the name there. Nothing else about the file is
+    trusted: size and checksum are measured after the bytes arrive.
+    """
+
+    __tablename__ = "images"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    filename: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
+    size_bytes: Mapped[int | None] = mapped_column(BigInteger)
+    sha256: Mapped[str | None] = mapped_column(String(64))
+    #: Where it was downloaded from, when it was.
+    source_url: Mapped[str | None] = mapped_column(Text)
+    #: ready | fetching | failed
+    status: Mapped[str] = mapped_column(String(16), default="ready", nullable=False)
+    error: Mapped[str | None] = mapped_column(Text)
+    uploaded_by: Mapped[str | None] = mapped_column(String(255))
+    notes: Mapped[str | None] = mapped_column(Text)
+
+
+# ---------------------------------------------------------------------------
 # IPAM
 # ---------------------------------------------------------------------------
 

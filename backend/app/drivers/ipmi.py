@@ -18,10 +18,14 @@ OpenIPMI's `ipmi_sim` (see deploy/sim/). Two behaviours worth knowing:
 from __future__ import annotations
 
 import os
+import pty
 import re
+import select
 import shutil
+import signal
 import subprocess
 import time
+from datetime import datetime
 
 from app.config import settings
 from app.drivers.base import (
@@ -60,6 +64,8 @@ BOOT_SELECTOR_TEXT: dict[str, str] = {
     "cd": "Force Boot from CD/DVD",
     "bios": "Force Boot into BIOS Setup",
 }
+
+POWER_RESTORE_POLICIES = ("always-on", "always-off", "previous")
 
 #: stderr lines that are noise, not failure.
 _NOISE = (
@@ -321,12 +327,155 @@ class IpmiDriver(BMCDriver):
                 self.log(f"could not set {parameter}: {exc}", level="warning")
         return self.sol_info()
 
+    # -- sensors and event log ---------------------------------------------
+
+    def sensors(self) -> list[dict]:
+        """Every sensor in the SDR with its current reading (`sdr elist`).
+
+        One IPMI round trip per sensor inside ipmitool, so a fully populated
+        M4 takes a second or two. Cached briefly by the API for the panel.
+        """
+        return parse_sdr_elist(self.run("sdr", "elist"))
+
+    def power_reading(self) -> dict | None:
+        """DCMI power draw in watts, or None where the BMC has no DCMI."""
+        try:
+            out = self.run("dcmi", "power", "reading")
+        except BMCError:
+            return None
+        fields = _colon_fields(out)
+        current = _int_prefix(fields.get("Instantaneous power reading"))
+        if current is None:
+            return None
+        return {
+            "watts": current,
+            "minimum": _int_prefix(fields.get("Minimum during sampling period")),
+            "maximum": _int_prefix(fields.get("Maximum during sampling period")),
+            "average": _int_prefix(fields.get("Average power reading over sample period")),
+        }
+
+    def sel_info(self) -> dict:
+        fields = _colon_fields(self.run("sel", "info"))
+        return {
+            "entries": _int_prefix(fields.get("Entries")) or 0,
+            "free_bytes": _int_prefix(fields.get("Free Space")),
+            "percent_used": _int_prefix(fields.get("Percent Used")),
+            "last_add": fields.get("Last Add Time"),
+            "last_clear": fields.get("Last Del Time"),
+            "overflow": fields.get("Overflow", "").lower() == "true",
+        }
+
+    def sel_entries(self) -> list[dict]:
+        """The System Event Log, newest last, with sensor names resolved."""
+        return parse_sel_elist(self.run("sel", "elist"))
+
+    def sel_clear(self) -> None:
+        self.run("sel", "clear")
+
+    # -- chassis -----------------------------------------------------------
+
+    def chassis_status(self) -> dict:
+        """Power, faults and the power-restore policy, as `chassis status` reports them."""
+        fields = _colon_fields(self.run("chassis", "status"))
+        return {_snake(key): value for key, value in fields.items()}
+
+    def identify(self, seconds: int = 15, *, force: bool = False) -> None:
+        """Blink the chassis locator LED. `seconds=0` turns it off; `force` leaves it on."""
+        if force:
+            self.run("chassis", "identify", "force")
+        else:
+            self.run("chassis", "identify", str(max(0, min(int(seconds), 255))))
+
+    def set_power_restore_policy(self, policy: str) -> None:
+        """What the server does when mains power returns: always-on, always-off, previous."""
+        if policy not in POWER_RESTORE_POLICIES:
+            raise ValueError(f"policy must be one of {', '.join(POWER_RESTORE_POLICIES)}")
+        self.run("chassis", "policy", policy)
+
+    # -- the BMC itself ----------------------------------------------------
+
+    def mc_info(self) -> dict:
+        fields = _colon_fields(self.run("mc", "info"))
+        return {
+            "firmware": fields.get("Firmware Revision"),
+            "ipmi_version": fields.get("IPMI Version"),
+            "manufacturer": fields.get("Manufacturer Name"),
+            "product": fields.get("Product Name"),
+            "device_id": fields.get("Device ID"),
+            "available": fields.get("Device Available", "").lower() == "yes",
+        }
+
+    def lan_config(self, channel: int = 1) -> dict:
+        """The BMC's own network settings (`lan print`)."""
+        fields = _colon_fields(self.run("lan", "print", str(channel)))
+        return {
+            "channel": channel,
+            "ip_address": fields.get("IP Address"),
+            "subnet_mask": fields.get("Subnet Mask"),
+            "gateway": fields.get("Default Gateway IP"),
+            "mac_address": fields.get("MAC Address"),
+            "source": fields.get("IP Address Source"),
+            "vlan": fields.get("802.1q VLAN ID"),
+        }
+
+    def bmc_reset(self, kind: str = "cold") -> None:
+        """Reboot the BMC. The host keeps running; IPMI and the web UI drop for a minute."""
+        if kind not in ("cold", "warm"):
+            raise ValueError("kind must be cold or warm")
+        self.run("mc", "reset", kind, timeout=15)
+
+    def users(self, channel: int = 1) -> list[dict]:
+        return parse_user_list(self.run("user", "list", str(channel)))
+
+    def user_id_for(self, username: str) -> int | None:
+        for user in self.users():
+            if user["name"] == username:
+                return user["id"]
+        return None
+
+    def set_user_password(self, user_id: int, password: str) -> None:
+        """Change a BMC user's password.
+
+        Never on the command line, where the process table would show it:
+        ipmitool asks for it twice on its terminal, so it is typed into a pty.
+        The prompt path sets a 16-byte password, the length every BMC accepts.
+        """
+        if not 1 <= len(password) <= 16:
+            raise ValueError("IPMI passwords are 1 to 16 characters")
+        cmd = [*self.base_command(), "user", "set", "password", str(user_id)]
+        request = {
+            "protocol": "ipmi", "host": self.host, "port": self.port,
+            "command": ["user", "set", "password", str(user_id), "***"],
+        }
+        output, rc = _run_on_pty(
+            cmd, self.environment(), answer=password, prompt="assword", answers=2,
+            timeout=self._timeout,
+        )
+        output = output.replace(password, "***")
+        response = {"rc": rc, "output": output.strip()[:2000]}
+        if rc != 0 or "successful" not in output.lower():
+            lines = [ln for ln in output.strip().splitlines() if "assword for user" not in ln]
+            detail = lines[-1].strip() if lines else f"exit status {rc}"
+            self.log(
+                f"ipmitool user set password {user_id} failed: {detail}",
+                level="error", request=request, response=response,
+            )
+            raise BMCError(
+                f"set user password: {diagnose(detail) or detail}",
+                request=request, response=response,
+            )
+        self.log(f"ipmitool user set password {user_id} -> ok", request=request,
+                 response=response)
+
     # -- unsupported -------------------------------------------------------
 
     def insert_virtual_media(self, image_url: str) -> None:
         raise BMCError("virtual media is not available over IPMI; use Redfish")
 
     def eject_virtual_media(self) -> None:
+        raise BMCError("virtual media is not available over IPMI; use Redfish")
+
+    def virtual_media(self) -> list[dict]:
         raise BMCError("virtual media is not available over IPMI; use Redfish")
 
 
@@ -341,3 +490,215 @@ def _colon_fields(text: str) -> dict[str, str]:
         if key and key not in out:
             out[key] = value
     return out
+
+
+def _snake(key: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", key.lower()).strip("_")
+
+
+def _int_prefix(value: str | None) -> int | None:
+    match = re.search(r"-?\d+", value or "")
+    return int(match.group()) if match else None
+
+
+#: ipmitool's unit spellings -> what the panel shows.
+_UNITS = {
+    "degrees c": "°C",
+    "degrees f": "°F",
+    "volts": "V",
+    "watts": "W",
+    "amps": "A",
+    "rpm": "RPM",
+    "percent": "%",
+    "unspecified": "",
+}
+_KIND_BY_UNIT = {"°C": "temperature", "°F": "temperature", "RPM": "fan", "V": "voltage",
+                 "W": "power", "A": "current"}
+#: `sdr elist` status column -> the platform's three-level health.
+_SDR_STATUS = {
+    "ok": "ok",
+    "nc": "warning", "lnc": "warning", "unc": "warning",
+    "cr": "critical", "lcr": "critical", "ucr": "critical",
+    "nr": "critical", "lnr": "critical", "unr": "critical",
+    "ns": "no_reading",
+}
+
+
+def _split_reading(reading: str) -> tuple[float | None, str | None]:
+    """"47 degrees C" -> (47.0, "°C"); "Presence detected" / "0x0180" -> (None, None)."""
+    text = reading.strip()
+    if text.lower().startswith("0x"):
+        return None, None  # a discrete sensor's state bits, not a quantity
+    match = re.match(r"^(-?\d+(?:\.\d+)?)\s*(.*)$", text)
+    if not match:
+        return None, None
+    value = float(match.group(1))
+    unit = match.group(2).strip()
+    return value, _UNITS.get(unit.lower(), unit)
+
+
+def _guess_kind(name: str) -> str:
+    lowered = name.lower()
+    if "temp" in lowered:
+        return "temperature"
+    if "fan" in lowered:
+        return "fan"
+    if "psu" in lowered or "power" in lowered or "pwr" in lowered:
+        return "power"
+    if "volt" in lowered or re.match(r"^p?\d+v", lowered) or "vbat" in lowered:
+        return "voltage"
+    return "discrete"
+
+
+def parse_sdr_elist(text: str) -> list[dict]:
+    """Parse `ipmitool sdr elist`: `Name | 30h | ok | 3.1 | 47 degrees C`."""
+    sensors: list[dict] = []
+    for line in text.splitlines():
+        parts = [p.strip() for p in line.split("|")]
+        if len(parts) < 5:
+            continue
+        name, ident, status, entity, reading = parts[:5]
+        match = re.match(r"^([0-9a-fA-F]+)h$", ident)
+        value, unit = _split_reading(reading)
+        sensors.append(
+            {
+                "name": name,
+                "number": int(match.group(1), 16) if match else None,
+                "status": _SDR_STATUS.get(status.lower(), "unknown"),
+                "raw_status": status,
+                "entity": entity,
+                "reading": reading,
+                "value": value,
+                "unit": unit,
+                "kind": _KIND_BY_UNIT.get(unit or "") or _guess_kind(name),
+            }
+        )
+    return sensors
+
+
+def _sel_timestamp(date: str, clock: str) -> str | None:
+    try:
+        return datetime.strptime(f"{date} {clock}", "%m/%d/%Y %H:%M:%S").isoformat()
+    except ValueError:
+        return None  # "Pre-Init" on a BMC whose clock is not set
+
+
+def _sel_severity(event: str, direction: str) -> str:
+    if direction.lower().startswith("deasserted"):
+        return "info"
+    lowered = event.lower()
+    if "non-critical" in lowered or "non-recoverable" not in lowered and any(
+        word in lowered for word in ("warning", "predictive", "degraded")
+    ):
+        return "warning"
+    if any(word in lowered for word in ("critical", "non-recoverable", "fail", "fault", "error")):
+        return "critical"
+    return "info"
+
+
+def parse_sel_elist(text: str) -> list[dict]:
+    """Parse `ipmitool sel elist` rows.
+
+    `   1 | 09/23/2026 | 14:03:11 | Fan FAN1 Tach | Lower Critical going low | Asserted | ...`
+    """
+    entries: list[dict] = []
+    for line in text.splitlines():
+        parts = [p.strip() for p in line.split("|")]
+        if len(parts) < 5:
+            continue  # "SEL has no entries", or a stray line
+        ident, date, clock, sensor, event = parts[:5]
+        try:
+            record_id = int(ident, 16)
+        except ValueError:
+            continue
+        direction = parts[5] if len(parts) > 5 else ""
+        entries.append(
+            {
+                "id": record_id,
+                "timestamp": _sel_timestamp(date, clock),
+                "raw_time": f"{date} {clock}".strip(),
+                "sensor": sensor,
+                "event": event,
+                "direction": direction,
+                "detail": " | ".join(parts[6:]) if len(parts) > 6 else None,
+                "severity": _sel_severity(event, direction),
+            }
+        )
+    return entries
+
+
+_USER_LINE = re.compile(
+    r"^\s*(\d+)\s+(.*?)\s+(true|false)\s+(true|false)\s+(true|false)\s+(.+?)\s*$"
+)
+
+
+def parse_user_list(text: str) -> list[dict]:
+    """Parse `ipmitool user list N`. Nameless slots are kept: they show what is free."""
+    users: list[dict] = []
+    for line in text.splitlines():
+        match = _USER_LINE.match(line)
+        if not match:
+            continue
+        user_id, name, callin, link_auth, ipmi_msg, privilege = match.groups()
+        users.append(
+            {
+                "id": int(user_id),
+                "name": name.strip(),
+                "callin": callin == "true",
+                "link_auth": link_auth == "true",
+                "ipmi_messaging": ipmi_msg == "true",
+                "privilege": privilege.strip(),
+            }
+        )
+    return users
+
+
+def _run_on_pty(
+    cmd: list[str],
+    env: dict[str, str],
+    *,
+    answer: str,
+    prompt: str,
+    answers: int,
+    timeout: int,
+) -> tuple[str, int]:
+    """Run `cmd` on a pseudo-terminal, typing `answer` at each `prompt`.
+
+    For ipmitool commands that insist on reading a secret from the terminal.
+    Returns (everything the command printed, exit status).
+    """
+    pid, fd = pty.fork()
+    if pid == 0:  # child
+        try:
+            os.execvpe(cmd[0], cmd, env)
+        finally:
+            os._exit(127)
+
+    buffer = b""
+    given = 0
+    needle = prompt.encode()
+    deadline = time.monotonic() + timeout
+    try:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                os.kill(pid, signal.SIGKILL)
+                os.waitpid(pid, 0)
+                raise BMCError(f"{cmd[-4]} {cmd[-3]} timed out after {timeout}s", retryable=True)
+            ready, _, _ = select.select([fd], [], [], min(remaining, 0.5))
+            if not ready:
+                continue
+            try:
+                chunk = os.read(fd, 4096)
+            except OSError:
+                break  # EIO: the child has exited and the slave side is closed
+            if not chunk:
+                break
+            buffer += chunk
+            while given < answers and buffer.count(needle) > given:
+                os.write(fd, (answer + "\n").encode())
+                given += 1
+    finally:
+        os.close(fd)
+    _, status = os.waitpid(pid, 0)
+    return buffer.decode("utf-8", "replace"), os.waitstatus_to_exitcode(status)
