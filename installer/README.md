@@ -77,14 +77,22 @@ VLAN.
 
 ## DHCP
 
-One option serves the whole fleet — iPXE substitutes the MAC itself:
+One fixed URL serves the whole fleet. iPXE fetches `/boot/ipxe`, gets a
+one-line `chain` script back, and expands `${net0/mac}` itself when it runs
+it — so the DHCP server never has to pass a `${...}` through untouched:
 
 ```
 # dnsmasq
 dhcp-match=set:ipxe,175
 dhcp-boot=tag:!ipxe,undionly.kpxe
-dhcp-boot=tag:ipxe,http://10.10.0.5:8000/boot/ipxe?mac=${net0/mac}
+dhcp-boot=tag:ipxe,http://10.10.0.5/boot/ipxe
+# Key leases on MAC only: iPXE, the ramdisk and the OS installer each send
+# a different client-id and must all land on the same address.
+dhcp-ignore-clid
 ```
+
+`deploy/install-management-server.sh` writes this for you, in either
+authoritative or proxy-DHCP form.
 
 A machine with no active job gets a script that boots from local disk, so
 leaving this in place permanently is fine and is what you want: every reboot

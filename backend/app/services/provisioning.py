@@ -14,7 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.enums import ActorType, JobType, RaidLevel, ServerState
-from app.models import Customer, Job, OSTemplate, Server, SSHKey
+from app.models import Customer, Job, OSTemplate, Server, SSHKey, Subscription
 from app.security import hash_password
 from app.services import jobs as job_service
 
@@ -25,6 +25,22 @@ class ProvisioningError(ValueError):
 
 #: States a server may be reinstalled from.
 REINSTALLABLE = {ServerState.ACTIVE, ServerState.RESCUE, ServerState.IN_STOCK}
+
+
+def key_owner_for(db: Session, server: Server, caller: Customer | None) -> Customer | None:
+    """Whose keys go on this server.
+
+    The subscription holder's, if there is one. An admin reinstalling a
+    customer's machine must not end up with the admin's own keys on it.
+    """
+    subscription = db.execute(
+        select(Subscription).where(
+            Subscription.server_id == server.id, Subscription.ended_at.is_(None)
+        )
+    ).scalar_one_or_none()
+    if subscription is not None:
+        return db.get(Customer, subscription.customer_id)
+    return caller
 
 
 def _resolve_ssh_keys(
@@ -75,7 +91,7 @@ def create_install_job(
     if not template.is_public and actor_type is ActorType.CUSTOMER:
         raise ProvisioningError("unknown OS template")
 
-    ssh_keys = _resolve_ssh_keys(db, customer, ssh_key_ids)
+    ssh_keys = _resolve_ssh_keys(db, key_owner_for(db, server, customer), ssh_key_ids)
     if not ssh_keys and not root_password:
         raise ProvisioningError(
             "provide at least one SSH key or a root password, or the server "
@@ -120,7 +136,7 @@ def create_rescue_job(
         raise ProvisioningError(
             "server has no provisioning MAC recorded; run an inventory sync first"
         )
-    ssh_keys = _resolve_ssh_keys(db, customer, ssh_key_ids)
+    ssh_keys = _resolve_ssh_keys(db, key_owner_for(db, server, customer), ssh_key_ids)
     if not ssh_keys:
         raise ProvisioningError("rescue mode needs at least one SSH key to log in with")
 

@@ -11,6 +11,7 @@ from fastapi import Depends, Header, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.db import get_db
 from app.models import APIToken, Customer, Job, Server, Subscription
 from app.security import decode_access_token, hash_api_token, token_prefix
@@ -140,15 +141,16 @@ def get_owned_job(
 def client_ip(request: Request) -> str | None:
     """Caller address for the audit log, or None if it is not an IP.
 
-    `X-Forwarded-For` is trusted because the API is only ever reached through
-    our own reverse proxy. If that stops being true, this must stop being true.
+    `X-Forwarded-For` is honoured only when `trust_proxy_headers` is set, which
+    should be true exactly when the API sits behind a reverse proxy we control
+    and false when it is reachable directly.
 
     The result is validated before it is returned: the audit column is `INET`,
     and a peer name that is not an address — a unix socket, a test transport,
     a malformed forwarded header — would otherwise turn an audit write into a
     500 on an endpoint that had already done its work.
     """
-    forwarded = request.headers.get("x-forwarded-for")
+    forwarded = request.headers.get("x-forwarded-for") if settings.trust_proxy_headers else None
     candidate = (
         forwarded.split(",")[0].strip()
         if forwarded

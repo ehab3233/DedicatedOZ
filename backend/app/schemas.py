@@ -8,14 +8,25 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
+from pydantic import BaseModel, BeforeValidator, ConfigDict, EmailStr, Field, field_validator
 
 from app.enums import ActorType, InstallMethod, JobState, JobType, RaidLevel, ServerState
 
 
 class ORMModel(BaseModel):
     model_config = ConfigDict(from_attributes=True)
+
+
+def _ip_to_str(value: object) -> object:
+    """psycopg returns INET columns as `ipaddress` objects; the API speaks strings."""
+    return None if value is None else str(value)
+
+
+#: A string field that accepts what the database hands back for INET columns.
+IPStr = Annotated[str, BeforeValidator(_ip_to_str)]
+OptionalIPStr = Annotated[str | None, BeforeValidator(_ip_to_str)]
 
 
 # ---------------------------------------------------------------------------
@@ -42,6 +53,65 @@ class CustomerOut(ORMModel):
     contact_name: str | None
     is_admin: bool
     created_at: datetime
+
+
+class CustomerCreate(BaseModel):
+    email: EmailStr
+    password: str = Field(min_length=12, max_length=1024)
+    company_name: str | None = Field(default=None, max_length=255)
+    contact_name: str | None = Field(default=None, max_length=255)
+    phone: str | None = Field(default=None, max_length=64)
+    billing_ref: str | None = Field(default=None, max_length=128)
+    is_admin: bool = False
+
+
+class CustomerUpdate(BaseModel):
+    company_name: str | None = None
+    contact_name: str | None = None
+    phone: str | None = None
+    billing_ref: str | None = None
+    is_active: bool | None = None
+    password: str | None = Field(default=None, min_length=12, max_length=1024)
+
+
+class AdminCustomerOut(CustomerOut):
+    phone: str | None
+    billing_ref: str | None
+    is_active: bool
+    active_servers: int = 0
+
+
+class SubscriptionCreate(BaseModel):
+    customer_id: uuid.UUID
+    server_id: uuid.UUID
+    plan_name: str = Field(min_length=1, max_length=128)
+    monthly_price: float | None = None
+    currency: str = Field(default="USD", min_length=3, max_length=3)
+    billing_ref: str | None = None
+    bandwidth_quota_tb: int | None = None
+
+
+class SubscriptionOut(ORMModel):
+    id: uuid.UUID
+    customer_id: uuid.UUID
+    server_id: uuid.UUID
+    plan_name: str
+    monthly_price: float | None
+    currency: str
+    billing_ref: str | None
+    bandwidth_quota_tb: int | None
+    started_at: datetime
+    ended_at: datetime | None
+    customer_email: str | None = None
+    server_serial: str | None = None
+
+
+class CredentialCreate(BaseModel):
+    """Store a BMC credential in the secrets backend under `ref`."""
+
+    ref: str = Field(min_length=1, max_length=255, pattern=r"^[A-Za-z0-9_./-]+$")
+    username: str = Field(min_length=1, max_length=64)
+    password: str = Field(min_length=1, max_length=256)
 
 
 class APITokenCreate(BaseModel):
@@ -138,7 +208,7 @@ class ServerDetailOut(ServerOut):
 
 
 class AdminServerOut(ServerDetailOut):
-    cimc_ip: str
+    cimc_ip: IPStr
     cimc_credential_ref: str
     cimc_firmware: str | None
     bios_version: str | None
@@ -308,9 +378,9 @@ class OSTemplateCreate(BaseModel):
 
 class IPAssignmentOut(ORMModel):
     id: uuid.UUID
-    address: str
+    address: IPStr
     prefix_len: int
-    gateway: str | None = None
+    gateway: OptionalIPStr = None
     is_primary: bool
     rdns: str | None
 
@@ -319,15 +389,34 @@ class RDNSUpdate(BaseModel):
     rdns: str | None = Field(default=None, max_length=255)
 
 
+class IPBlockCreate(BaseModel):
+    cidr: str
+    gateway: str | None = None
+    routing_mode: str = Field(default="bridged", pattern="^(bridged|routed)$")
+    vlan: int | None = Field(default=None, ge=1, le=4094)
+    datacenter: str | None = None
+    source: str | None = None
+    notes: str | None = None
+
+
+class IPAssignCreate(BaseModel):
+    block_id: uuid.UUID
+    address: str
+    is_primary: bool = False
+
+
 class IPBlockOut(ORMModel):
     id: uuid.UUID
     cidr: str
     version: int
-    gateway: str | None
+    gateway: OptionalIPStr
     routing_mode: str
     vlan: int | None
     datacenter: str | None
+    source: str | None = None
     is_assignable: bool
+    total_hosts: int = 0
+    assigned: int = 0
 
 
 # ---------------------------------------------------------------------------

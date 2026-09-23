@@ -8,7 +8,7 @@ export default defineConfig({
     // The portal and the API are same-origin in production behind the reverse
     // proxy; this keeps development identical so nothing depends on CORS.
     proxy: {
-      '/api': { target: 'http://localhost:8000', changeOrigin: true },
+      '/api': { target: 'http://localhost:8000', changeOrigin: true, ws: true },
       '/health': { target: 'http://localhost:8000', changeOrigin: true },
     },
   },

@@ -74,8 +74,8 @@ jobs:
 
       # The ramdisk runs BusyBox ash. dash is the closest thing available here
       # and catches bashisms that would fail on a machine in a rack.
-      - name: Shell-check the build script
+      - name: Syntax-check the shell scripts
         run: |
-          sudo apt-get update -qq && sudo apt-get install -y -qq dash shellcheck
-          dash -n installer/build-ramdisk.sh || bash -n installer/build-ramdisk.sh
-          shellcheck -S warning installer/build-ramdisk.sh || true
+          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+          for f in doz.sh installer/build-ramdisk.sh deploy/*.sh; do bash -n "$f"; done
+          shellcheck -S warning -e SC1091,SC2086,SC2046 doz.sh installer/build-ramdisk.sh deploy/*.sh || true

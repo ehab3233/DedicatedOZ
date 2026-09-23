@@ -29,7 +29,9 @@ rootpw --iscrypted {{ root_password_hash }}
 rootpw --lock
 {% endif %}
 
-sshkey --username=root "{{ ssh_keys[0] if ssh_keys else '' }}"
+{% if ssh_keys %}
+sshkey --username=root "{{ ssh_keys[0] }}"
+{% endif %}
 
 ### Storage
 ### /dev/sda is the virtual drive created by the ramdisk. `clearpart --all`

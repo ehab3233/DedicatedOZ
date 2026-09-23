@@ -29,6 +29,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from fastapi.responses import PlainTextResponse
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.db import get_db
 from app.deps import client_ip
 from app.enums import ActorType, JobState
@@ -45,6 +46,15 @@ router = APIRouter(prefix="/boot", tags=["boot"])
 #: falls through to the next device rather than looping back into iPXE.
 BOOT_LOCAL_SCRIPT = """#!ipxe
 echo No provisioning job for this host. Booting from local disk.
+sanboot --no-describe --drive 0x80 || exit
+"""
+
+#: Sent when the entry point is hit without a MAC. iPXE expands `${net0/mac}`
+#: itself when it runs this, so DHCP only ever has to hand out a fixed URL --
+#: no reliance on the DHCP server passing `${...}` through untouched.
+BOOT_CHAIN_SCRIPT = """#!ipxe
+chain {base}/boot/ipxe?mac=${{net0/mac}} || goto local
+:local
 sanboot --no-describe --drive 0x80 || exit
 """
 
@@ -71,6 +81,8 @@ def _resolve(db: Session, mac: str, request: Request, *, signature: str | None =
 def _pin_client(db: Session, job: Job, request: Request) -> None:
     """Bind a job's boot material to the first address that asked for it."""
     source = client_ip(request)
+    if not settings.boot_pin_client_ip:
+        return
     payload = dict(job.payload or {})
     pinned = payload.get("_boot_client_ip")
 
@@ -110,7 +122,8 @@ def ipxe_entry(
     so one DHCP option serves the whole fleet.
     """
     if not mac:
-        return PlainTextResponse(BOOT_LOCAL_SCRIPT, media_type="text/plain")
+        base = settings.control_plane_url.rstrip("/")
+        return PlainTextResponse(BOOT_CHAIN_SCRIPT.format(base=base), media_type="text/plain")
 
     try:
         normalised = normalise_mac(mac)
@@ -148,6 +161,49 @@ def answer_file(
     job_service.log(db, job, "answer file served")
     db.commit()
     return PlainTextResponse(body, media_type=content_type)
+
+
+@router.get("/nocloud/{mac}/{sig}/user-data", response_class=PlainTextResponse)
+def nocloud_user_data(
+    mac: str,
+    sig: str,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> PlainTextResponse:
+    """Ubuntu autoinstall seed.
+
+    cloud-init's NoCloud datasource is given a directory URL and appends
+    `user-data` and `meta-data` itself, so the signature has to ride in the
+    path rather than the query string. The body is the same answer file the
+    generic endpoint serves.
+    """
+    server, job = _resolve(db, mac, request, signature=sig)
+    try:
+        content_type, body = boot_service.render_answer_file(db, server, job)
+    except boot_service.NoActiveInstall as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    job_service.log(db, job, "nocloud user-data served")
+    db.commit()
+    return PlainTextResponse(body, media_type=content_type)
+
+
+@router.get("/nocloud/{mac}/{sig}/meta-data", response_class=PlainTextResponse)
+def nocloud_meta_data(
+    mac: str,
+    sig: str,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> PlainTextResponse:
+    server, job = _resolve(db, mac, request, signature=sig)
+    hostname = (job.payload or {}).get("hostname") or server.hostname or f"srv-{server.serial}"
+    body = f"instance-id: doz-{job.id}\nlocal-hostname: {hostname}\n"
+    return PlainTextResponse(body, media_type="text/yaml")
+
+
+@router.get("/nocloud/{mac}/{sig}/vendor-data", response_class=PlainTextResponse)
+def nocloud_vendor_data(mac: str, sig: str) -> PlainTextResponse:
+    # cloud-init probes for it; an empty document stops the 404 noise.
+    return PlainTextResponse("", media_type="text/yaml")
 
 
 @router.get("/provision/{mac}", response_class=PlainTextResponse)

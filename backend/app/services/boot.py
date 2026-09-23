@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import ipaddress
 import os
+import secrets
 from functools import lru_cache
 from pathlib import Path
 
@@ -24,7 +25,7 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.enums import JobState, JobType
 from app.models import IPAssignment, Job, OSTemplate, Server, SSHKey, Subscription
-from app.security import boot_signature
+from app.security import boot_signature, hash_password
 
 
 def template_dir() -> Path:
@@ -169,7 +170,7 @@ def install_context(db: Session, server: Server, job: Job) -> dict:
                 "kernel_url": _asset_url(template.kernel_path),
                 "initrd_url": _asset_url(template.initrd_path),
                 "iso_url": _asset_url(template.iso_path),
-                "kernel_args": template.kernel_args or "",
+                "kernel_args": _render_kernel_args(template.kernel_args),
             }
             if template
             else None
@@ -181,10 +182,24 @@ def install_context(db: Session, server: Server, job: Job) -> dict:
         "network": build_network_context(db, server),
         "ssh_keys": payload.get("ssh_keys") or collect_ssh_keys(db, server),
         "root_password_hash": payload.get("root_password_hash"),
+        # For answer formats that insist on a password for an account we do
+        # not want anyone using. bcrypt hashes are accepted by libxcrypt on
+        # every distribution we install.
+        "throwaway_password_hash": hash_password(secrets.token_urlsafe(24)),
         "control_plane_url": settings.control_plane_url.rstrip("/"),
         "boot_asset_base_url": settings.boot_asset_base_url.rstrip("/"),
         "boot_signature": boot_signature(mac) if mac else "",
     }
+
+
+def _render_kernel_args(args: str | None) -> str:
+    """Template-expand `{{ boot_asset_base_url }}` in stored kernel arguments."""
+    if not args:
+        return ""
+    return jinja_env().from_string(args).render(
+        boot_asset_base_url=settings.boot_asset_base_url.rstrip("/"),
+        control_plane_url=settings.control_plane_url.rstrip("/"),
+    )
 
 
 def _asset_url(path: str | None) -> str | None:

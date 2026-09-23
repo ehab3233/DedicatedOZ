@@ -26,6 +26,16 @@ log() {
     echo "[doz] $*" | tee /dev/console
 }
 
+# BusyBox sleep does not accept "infinity"; this is the portable spelling.
+hold() {
+    while :; do sleep 3600; done
+}
+
+# Minimal JSON string escaping for the callback bodies.
+json_str() {
+    printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr -d '\n\r'
+}
+
 # Progress and completion both go to the control plane. Failures to report are
 # logged but never fatal on their own: a machine that finished installing but
 # could not phone home is recoverable, one that halted mid-install is not.
@@ -37,7 +47,7 @@ report() {
     curl -sf -m 15 -X POST \
         -H "Authorization: Bearer $CALLBACK_TOKEN" \
         -H "Content-Type: application/json" \
-        -d "{\"stage\":\"$stage\",\"progress\":$percent,\"message\":\"$message\"}" \
+        -d "{\"stage\":\"$(json_str "$stage")\",\"progress\":$percent,\"message\":\"$(json_str "$message")\"}" \
         "$CONTROL_PLANE/boot/callback/$JOB_ID/progress" >/dev/null 2>&1 \
         || log "warning: progress callback failed (continuing)"
 }
@@ -55,7 +65,7 @@ complete() {
         if curl -sf -m 30 -X POST \
             -H "Authorization: Bearer $CALLBACK_TOKEN" \
             -H "Content-Type: application/json" \
-            -d "{\"success\":$success,\"message\":\"$message\",\"drives_wiped\":$drives_json,\"host_keys\":$host_keys_json}" \
+            -d "{\"success\":$success,\"message\":\"$(json_str "$message")\",\"drives_wiped\":$drives_json,\"host_keys\":$host_keys_json}" \
             "$CONTROL_PLANE/boot/callback/$JOB_ID/complete" >/dev/null 2>&1; then
             return 0
         fi
@@ -75,7 +85,7 @@ on_error() {
     complete false "provisioning script failed at line ${1:-?} with exit code $code" || true
     log "halting for inspection -- serial console is still attached"
     # Stay up. A machine that reboots on failure destroys the evidence.
-    sleep infinity
+    hold
 }
 trap 'on_error $LINENO' EXIT
 
@@ -265,8 +275,12 @@ setup_ssh() {
 {% endfor %}
     chmod 600 /root/.ssh/authorized_keys
 
+    # Alpine ships root locked ("!" in shadow) and sshd honours that even for
+    # key auth. "*" means "no password", which is what we actually want.
+    sed -i 's/^root:!:/root:*:/; s/^root:!!:/root:*:/' /etc/shadow 2>/dev/null || true
+    mkdir -p /var/empty
     ssh-keygen -A >/dev/null 2>&1 || true
-    /usr/sbin/sshd -D &
+    /usr/sbin/sshd -D -o PermitRootLogin=prohibit-password &
     log "sshd started"
 }
 
@@ -293,7 +307,7 @@ do_rescue() {
     complete true "rescue environment ready" "[]" "$(host_key_fingerprints)"
     trap - EXIT
     log "rescue mode active. Sleeping forever; reboot from the portal to exit."
-    sleep infinity
+    hold
 }
 
 do_wipe() {
@@ -329,14 +343,14 @@ do_wipe() {
         complete false "failed to erase:$failed" "$drives_json"
         trap - EXIT
         log "halting: some drives could not be erased"
-        sleep infinity
+        hold
     fi
 
     report "erase complete" 95 "$n drives erased"
     complete true "$n drives erased" "$drives_json"
     trap - EXIT
     log "wipe finished; the control plane will power this server down"
-    sleep infinity
+    hold
 }
 
 do_install() {
@@ -367,7 +381,9 @@ install_os() {
     # bootloader placement and driver selection than anything we would write,
     # and it is what the answer file formats expect.
 {% if os.install_method == 'autoinstall' %}
-    KARGS="autoinstall ds=nocloud-net;s=$ANSWER_URL"
+    # NoCloud wants a directory it can append user-data / meta-data to.
+    SEED_URL="{{ control_plane_url }}/boot/nocloud/{{ server.mac }}/{{ boot_signature }}/"
+    KARGS="autoinstall ds=nocloud-net;s=$SEED_URL"
 {% elif os.install_method == 'kickstart' %}
     KARGS="inst.ks=$ANSWER_URL inst.text"
 {% elif os.install_method == 'preseed' %}
@@ -392,7 +408,7 @@ install_os() {
 {% else %}
     complete false "job has no OS template attached"
     trap - EXIT
-    sleep infinity
+    hold
 {% endif %}
 }
 
@@ -411,6 +427,6 @@ case "$MODE" in
         log "ERROR: unknown mode $MODE"
         complete false "unknown provisioning mode $MODE"
         trap - EXIT
-        sleep infinity
+        hold
         ;;
 esac

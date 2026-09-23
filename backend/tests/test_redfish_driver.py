@@ -311,11 +311,71 @@ class TestRetryAndErrors:
     @responses.activate
     def test_401_is_not_retried(self, monkeypatch):
         monkeypatch.setattr("app.drivers.redfish.time.sleep", lambda _: None)
-        responses.add(responses.GET, f"{BASE}/redfish/v1/Systems", status=401)
+        responses.add(responses.POST, f"{BASE}/redfish/v1/SessionService/Sessions", status=401)
 
-        with pytest.raises(BMCError, match="401"):
+        with pytest.raises(BMCError, match="rejected the credentials"):
             driver().power_status()
+        # One login attempt, no retries, no fallback to basic auth.
         assert len(responses.calls) == 1
+
+
+class TestSessionAuth:
+    """The CIMC caps concurrent sessions; the driver must use exactly one."""
+
+    @responses.activate
+    def test_logs_in_once_and_uses_the_token(self):
+        responses.add(
+            responses.POST,
+            f"{BASE}/redfish/v1/SessionService/Sessions",
+            status=201,
+            headers={
+                "X-Auth-Token": "tok-123",
+                "Location": "/redfish/v1/SessionService/Sessions/1",
+            },
+            json={"@odata.id": "/redfish/v1/SessionService/Sessions/1"},
+        )
+        register_common(responses)
+
+        d = driver()
+        d.power_status()
+        d.power_status()
+
+        logins = [c for c in responses.calls if c.request.method == "POST"]
+        assert len(logins) == 1
+        gets = [c for c in responses.calls if c.request.method == "GET"]
+        assert all(c.request.headers.get("X-Auth-Token") == "tok-123" for c in gets)
+        assert all("Authorization" not in c.request.headers for c in gets)
+
+    @responses.activate
+    def test_close_deletes_the_session(self):
+        responses.add(
+            responses.POST,
+            f"{BASE}/redfish/v1/SessionService/Sessions",
+            status=201,
+            headers={
+                "X-Auth-Token": "tok-123",
+                "Location": "/redfish/v1/SessionService/Sessions/1",
+            },
+            json={},
+        )
+        register_common(responses)
+        responses.add(responses.DELETE, f"{BASE}/redfish/v1/SessionService/Sessions/1", status=204)
+
+        with driver() as d:
+            d.power_status()
+
+        deletes = [c for c in responses.calls if c.request.method == "DELETE"]
+        assert len(deletes) == 1
+
+    @responses.activate
+    def test_falls_back_to_basic_auth_without_a_session_service(self):
+        """Old builds: the session endpoint 404s but basic auth still works."""
+        responses.add(responses.POST, f"{BASE}/redfish/v1/SessionService/Sessions", status=404)
+        register_common(responses)
+
+        driver().power_status()
+        gets = [c for c in responses.calls if c.request.method == "GET"]
+        assert all(c.request.headers.get("Authorization", "").startswith("Basic ") for c in gets)
 
 
 class TestRedaction:

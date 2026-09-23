@@ -86,6 +86,7 @@ anything reaches the job log.
 ## Repository layout
 
 ```
+doz.sh               run script: up / down / logs / test / bench / ...
 backend/
   app/
     drivers/         Redfish driver + the vendor-neutral interface
@@ -99,7 +100,13 @@ backend/
 installer/
   templates/         iPXE scripts, provision.sh, OS answer files (Jinja2)
   build-ramdisk.sh   builds the installer image
-frontend/            React portal
+frontend/            React portal + management panel
+deploy/
+  install-management-server.sh   Ubuntu VM -> control plane, from scratch
+  fetch-os-images.sh             Ubuntu / Debian / Rocky netboot assets
+docs/
+  GETTING-STARTED.md   flat-network onboarding, CIMC setup, first reinstall
+  REVIEW.md            what would have broken, what was fixed, what is unknown
 ```
 
 ---
@@ -129,18 +136,50 @@ failure ambiguous.
 
 ## Running it
 
+### On the management server (production)
+
+A fresh Ubuntu 22.04 / 24.04 VM becomes the whole control plane — API,
+workers, nginx, PXE — in one command:
+
 ```sh
-cp .env.example .env       # then edit DOZ_JWT_SECRET and the CIMC credentials
-docker compose up -d postgres redis
-cd backend && python -m scripts.init_db --admin-email you@example.com
-uvicorn app.main:app --reload
-celery -A app.workers.celery_app.celery_app worker -Q provision,power,poll
-cd ../frontend && npm install && npm run dev
+git clone https://github.com/ehab3233/DedicatedOZ.git && cd DedicatedOZ
+sudo ./deploy/install-management-server.sh --ip 10.0.0.5 --dhcp-range 10.0.0.200,10.0.0.249
 ```
 
-Portal at http://localhost:5173, API docs at http://localhost:8000/docs.
+Then **[docs/GETTING-STARTED.md](docs/GETTING-STARTED.md)** walks through
+getting the first server in: CIMC setup, the bench test, registering it in
+the panel, addressing, the first reinstall. It assumes a flat network and
+says what to change when you outgrow one.
 
-Or the whole stack: `docker compose up --build`.
+### On a laptop (development)
+
+```sh
+./doz.sh up          # creates .env, venv, node_modules; inits the DB; starts everything
+./doz.sh logs        # api, worker, beat, frontend
+./doz.sh down
+```
+
+Needs a local PostgreSQL and Redis (`docker compose up -d postgres redis`
+gives you both). Portal at http://localhost:5173, API docs at
+http://localhost:8000/docs.
+
+`./doz.sh` also wraps `test`, `lint`, `shell`, `bench <cimc-ip>`,
+`reset-admin <email>`, `assets` (fetch OS images) and `ramdisk` (build the
+installer image), and detects whether it is talking to a dev checkout, a
+docker compose stack, or a systemd install.
+
+### The management panel
+
+Log in as an admin and open **Manage**:
+
+| Page | What you do there |
+|---|---|
+| Fleet | Every server with rack position, CIMC, firmware drift, PXE MAC, state, health, customer. **Add server** registers one and syncs its hardware. |
+| Server | Power, reinstall, rescue, secure wipe, lifecycle state, suspend, inventory sync, health check, address assignment, assign to a customer, serial console, and every job with its raw BMC log. |
+| Customers | Create accounts, generate initial passwords, disable logins, see and end subscriptions. |
+| IP space | Add blocks with gateways and provenance, see utilisation, find free addresses. |
+| Jobs | Everything that has run, filterable by state, with raw Redfish exchanges. |
+| Audit | Who did what, from where, when. |
 
 ### Tests
 
@@ -150,9 +189,14 @@ cd backend && python -m pytest
 
 They run against a real PostgreSQL (JSONB, INET, partial unique indexes), so
 they test what actually ships. The Redfish driver is tested against a simulated
-CIMC including its known misbehaviours — a boot override that reports success
-without taking effect, reset types the BMC will not accept, and virtual media
-missing its InsertMedia action.
+CIMC including its known misbehaviours — session limits, a boot override that
+reports success without taking effect, reset types the BMC will not accept, and
+virtual media missing its InsertMedia action. Every rendered provisioning
+script is syntax-checked with a POSIX shell.
+
+**[docs/REVIEW.md](docs/REVIEW.md)** is an honest pass over what would have
+broken on real hardware (fixed), what would have bitten on a flat network
+(fixed), and what genuinely cannot be known until the bench test runs.
 
 ---
 

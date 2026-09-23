@@ -32,7 +32,11 @@ DEFAULT_TEMPLATES = [
         "install_method": InstallMethod.AUTOINSTALL,
         "kernel_path": "/os/ubuntu-22.04/casper/vmlinuz",
         "initrd_path": "/os/ubuntu-22.04/casper/initrd",
-        "kernel_args": "",
+        # The casper initrd fetches the live squashfs from this ISO. Without
+        # it the installer boots to a prompt and waits forever.
+        "kernel_args": (
+            "url={{ boot_asset_base_url }}/os/ubuntu-22.04/ubuntu-22.04-live-server-amd64.iso"
+        ),
         "config_template": "ubuntu-2204-autoinstall.yaml.j2",
         "default_raid_level": RaidLevel.RAID1,
         "sort_order": 10,
@@ -45,7 +49,7 @@ DEFAULT_TEMPLATES = [
         "install_method": InstallMethod.PRESEED,
         "kernel_path": "/os/debian-12/linux",
         "initrd_path": "/os/debian-12/initrd.gz",
-        "kernel_args": "",
+        "kernel_args": "interface=auto netcfg/dhcp_timeout=60",
         "config_template": "debian-12-preseed.cfg.j2",
         "default_raid_level": RaidLevel.RAID1,
         "sort_order": 20,

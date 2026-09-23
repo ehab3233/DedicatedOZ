@@ -14,9 +14,10 @@ autoinstall:
   identity:
     hostname: {{ server.hostname }}
     username: doz-setup
-    # Placeholder account. It is locked in late-commands; the machine is
-    # reachable by the customer's SSH keys as root, not through this.
-    password: "!"
+    # Subiquity insists on an identity block with a crypted password. This is
+    # a hash of a random value nobody knows, and the account is locked in
+    # late-commands; customers log in as root with their keys.
+    password: "{{ throwaway_password_hash }}"
 
   ssh:
     install-server: true
@@ -61,7 +62,7 @@ autoinstall:
   late-commands:
     # Root logs in by key. The setup account exists only because autoinstall
     # insists on an identity block.
-    - usermod -L doz-setup || true
+    - curtin in-target --target=/target -- usermod -L doz-setup || true
     - mkdir -p /target/root/.ssh
     - chmod 700 /target/root/.ssh
 {% for key in ssh_keys %}
@@ -70,7 +71,7 @@ autoinstall:
     - chmod 600 /target/root/.ssh/authorized_keys || true
     - sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin prohibit-password/' /target/etc/ssh/sshd_config
 {% if root_password_hash %}
-    - usermod -p '{{ root_password_hash }}' root --root /target
+    - curtin in-target --target=/target -- usermod -p '{{ root_password_hash }}' root
 {% endif %}
     # Report success from inside the installer, before the reboot. Ten tries
     # over a couple of minutes: the network comes up before this runs, but the

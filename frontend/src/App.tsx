@@ -7,7 +7,13 @@ import ServerDetail from './pages/ServerDetail'
 import JobDetail from './pages/JobDetail'
 import SSHKeys from './pages/SSHKeys'
 import Console from './pages/Console'
-import Admin from './pages/Admin'
+import AdminLayout from './pages/admin/AdminLayout'
+import Fleet from './pages/admin/Fleet'
+import ServerAdmin from './pages/admin/ServerAdmin'
+import Customers from './pages/admin/Customers'
+import IPAM from './pages/admin/IPAM'
+import Jobs from './pages/admin/Jobs'
+import Audit from './pages/admin/Audit'
 
 export default function App() {
   const [me, setMe] = useState<Me | null>(null)
@@ -45,36 +51,39 @@ export default function App() {
     navigate('/login')
   }
 
+  const link = ({ isActive }: { isActive: boolean }) => (isActive ? 'active' : '')
+
   return (
     <>
       <header className="topbar">
         <span className="brand">DedicatedOZ</span>
         <nav>
-          <NavLink to="/servers" className={({ isActive }) => (isActive ? 'active' : '')}>
-            Servers
-          </NavLink>
-          <NavLink to="/ssh-keys" className={({ isActive }) => (isActive ? 'active' : '')}>
-            SSH keys
-          </NavLink>
-          {me.is_admin && (
-            <NavLink to="/admin" className={({ isActive }) => (isActive ? 'active' : '')}>
-              Admin
-            </NavLink>
-          )}
+          <NavLink to="/servers" className={link}>Servers</NavLink>
+          <NavLink to="/ssh-keys" className={link}>SSH keys</NavLink>
+          {me.is_admin && <NavLink to="/admin" className={link}>Manage</NavLink>}
         </nav>
         <span className="subtle">{me.email}</span>
         <button onClick={signOut}>Sign out</button>
       </header>
 
       <Routes>
-        <Route path="/" element={<Navigate to="/servers" replace />} />
+        <Route path="/" element={<Navigate to={me.is_admin ? '/admin' : '/servers'} replace />} />
         <Route path="/login" element={<Navigate to="/servers" replace />} />
         <Route path="/servers" element={<Servers />} />
         <Route path="/servers/:id" element={<ServerDetail isAdmin={me.is_admin} />} />
         <Route path="/servers/:id/console" element={<Console />} />
         <Route path="/jobs/:id" element={<JobDetail isAdmin={me.is_admin} />} />
         <Route path="/ssh-keys" element={<SSHKeys />} />
-        {me.is_admin && <Route path="/admin" element={<Admin />} />}
+        {me.is_admin && (
+          <Route path="/admin" element={<AdminLayout />}>
+            <Route index element={<Fleet />} />
+            <Route path="servers/:id" element={<ServerAdmin />} />
+            <Route path="customers" element={<Customers />} />
+            <Route path="ipam" element={<IPAM />} />
+            <Route path="jobs" element={<Jobs />} />
+            <Route path="audit" element={<Audit />} />
+          </Route>
+        )}
         <Route path="*" element={<Navigate to="/servers" replace />} />
       </Routes>
     </>

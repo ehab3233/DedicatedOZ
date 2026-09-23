@@ -1,0 +1,50 @@
+/home/user/DedicatedOZ/backend/.venv/lib/python3.11/site-packages/celery/platforms.py:841: SecurityWarning: You're running the worker with superuser privileges: this is
+absolutely not recommended!
+
+Please specify a different user using the --uid option.
+
+User information: uid=0 euid=0 gid=0 egid=0
+
+  warnings.warn(SecurityWarning(ROOT_DISCOURAGED.format(
+ 
+ -------------- celery@vm v5.6.3 (recovery)
+--- ***** ----- 
+-- ******* ---- Linux-6.18.44-fc-v37-x86_64-with-glibc2.39 2026-09-23 11:50:11
+- *** --- * --- 
+- ** ---------- [config]
+- ** ---------- .> app:         doz:0x7f045699e190
+- ** ---------- .> transport:   redis://localhost:6379/0
+- ** ---------- .> results:     redis://localhost:6379/0
+- *** --- * --- .> concurrency: 4 (prefork)
+-- ******* ---- .> task events: OFF (enable -E to monitor tasks in this worker)
+--- ***** ----- 
+ -------------- [queues]
+                .> poll             exchange=poll(direct) key=poll
+                .> power            exchange=power(direct) key=power
+                .> provision        exchange=provision(direct) key=provision
+
+[tasks]
+  . doz.poll.bandwidth_all
+  . doz.poll.health
+  . doz.poll.health_all
+  . doz.poll.health_one
+  . doz.poll.inventory_sync
+  . doz.poll.reap_jobs
+  . doz.poll.redispatch_queued
+  . doz.power.execute
+  . doz.provision.install
+  . doz.provision.rescue
+  . doz.provision.wipe
+
+[2026-09-23 11:50:11,852: INFO/MainProcess] Connected to redis://localhost:6379/0
+[2026-09-23 11:50:11,857: INFO/MainProcess] mingle: searching for neighbors
+[2026-09-23 11:50:12,867: INFO/MainProcess] mingle: all alone
+[2026-09-23 11:50:12,880: INFO/MainProcess] celery@vm ready.
+[2026-09-23 11:50:12,883: INFO/MainProcess] Task doz.poll.redispatch_queued[64b3f7d9-3d49-4a5e-8771-ab3581ead94d] received
+[2026-09-23 11:50:12,885: INFO/MainProcess] Task doz.poll.reap_jobs[2cbf34f0-a318-4732-82e7-5e0c1f3bca81] received
+[2026-09-23 11:50:12,886: INFO/MainProcess] Task doz.poll.bandwidth_all[0501e993-49ef-465e-b3b2-dda7c069acc6] received
+[2026-09-23 11:50:12,894: INFO/ForkPoolWorker-3] Task doz.poll.bandwidth_all[0501e993-49ef-465e-b3b2-dda7c069acc6] succeeded in 0.0063327610000669665s: {'collected': 0, 'note': 'switch poller not configured'}
+[2026-09-23 11:50:12,965: INFO/ForkPoolWorker-2] Task doz.poll.reap_jobs[2cbf34f0-a318-4732-82e7-5e0c1f3bca81] succeeded in 0.07893947200000184s: {'reaped': 0}
+[2026-09-23 11:50:12,975: INFO/ForkPoolWorker-4] Task doz.poll.redispatch_queued[64b3f7d9-3d49-4a5e-8771-ab3581ead94d] succeeded in 0.09085124800003541s: {'stuck': 0, 'redispatched': 0}
+
+worker: Warm shutdown (MainProcess)

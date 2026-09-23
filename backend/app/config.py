@@ -55,12 +55,21 @@ class Settings(BaseSettings):
     callback_token_ttl_seconds: int = 60 * 60 * 4
     # Wipe passes before a server may return to in_stock.
     require_wipe_before_stock: bool = True
+    # Bind a job's boot material to the first client address that fetches it.
+    # Requires a DHCP server that hands the same address to a MAC regardless of
+    # client-id (dnsmasq: `dhcp-ignore-clid`). Turn off when using someone
+    # else's DHCP in proxy mode, or the OS installer may be refused mid-install.
+    boot_pin_client_ip: bool = True
 
     # --- console -----------------------------------------------------------
     ipmitool_path: str = "ipmitool"
     sol_idle_timeout_seconds: int = 900
 
     # --- misc --------------------------------------------------------------
+    # Only honour X-Forwarded-For when a reverse proxy we control sets it. On a
+    # flat network with the API exposed directly, trusting it would let any
+    # host forge its address and defeat boot-script client pinning.
+    trust_proxy_headers: bool = False
     cors_origins: str = "http://localhost:5173"
     log_level: str = "INFO"
     environment: str = "development"

@@ -9,7 +9,17 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
-from app.api import admin, auth, boot, console, jobs, os_templates, servers, ssh_keys
+from app.api import (
+    admin,
+    admin_accounts,
+    auth,
+    boot,
+    console,
+    jobs,
+    os_templates,
+    servers,
+    ssh_keys,
+)
 from app.config import settings
 from app.db import engine
 
@@ -43,6 +53,7 @@ app.include_router(ssh_keys.router)
 app.include_router(os_templates.router)
 app.include_router(console.router)
 app.include_router(admin.router)
+app.include_router(admin_accounts.router)
 app.include_router(boot.router)
 
 

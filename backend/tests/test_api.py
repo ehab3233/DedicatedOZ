@@ -483,7 +483,7 @@ class TestAdminGuards:
             def get_bmc_credential(self, ref):  # noqa: ANN001
                 raise SecretNotFoundError("nope")
 
-        monkeypatch.setattr("app.secrets.get_secrets_backend", lambda: Broken())
+        monkeypatch.setattr("app.api.admin.get_secrets_backend", lambda: Broken())
 
         response = client.post(
             "/api/v1/admin/servers",

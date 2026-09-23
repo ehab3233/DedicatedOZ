@@ -159,6 +159,81 @@ export interface BandwidthSeries {
   total_tx_bytes: number
 }
 
+export interface AdminServer extends ServerDetail {
+  cimc_ip: string
+  cimc_credential_ref: string
+  cimc_firmware: string | null
+  bios_version: string | null
+  rack: string | null
+  rack_unit: number | null
+  switch_name: string | null
+  switch_port: string | null
+  customer_vlan: number | null
+  provisioning_mac: string | null
+  last_wiped_at: string | null
+  notes: string | null
+  customer_email: string | null
+}
+
+export interface AdminCustomer extends Me {
+  phone: string | null
+  billing_ref: string | null
+  is_active: boolean
+  active_servers: number
+  created_at: string
+}
+
+export interface Subscription {
+  id: string
+  customer_id: string
+  server_id: string
+  plan_name: string
+  monthly_price: number | null
+  currency: string
+  billing_ref: string | null
+  bandwidth_quota_tb: number | null
+  started_at: string
+  ended_at: string | null
+  customer_email: string | null
+  server_serial: string | null
+}
+
+export interface IPBlock {
+  id: string
+  cidr: string
+  version: number
+  gateway: string | null
+  routing_mode: string
+  vlan: number | null
+  datacenter: string | null
+  source: string | null
+  is_assignable: boolean
+  total_hosts: number
+  assigned: number
+}
+
+export interface AdminJobLogEntry extends JobLogEntry {
+  request: Record<string, unknown> | null
+  response: Record<string, unknown> | null
+  customer_visible: boolean
+}
+
+export interface AdminJobDetail extends JobDetail {
+  log: AdminJobLogEntry[]
+  payload: Record<string, unknown>
+  celery_task_id: string | null
+  attempts: number
+}
+
+export interface FleetSummary {
+  servers_by_state: Record<string, number>
+  total_servers: number
+  active_jobs: number
+  failed_jobs_24h: number
+  unhealthy_servers: number
+  open_abuse_reports: number
+}
+
 export interface Me {
   id: string
   email: string
@@ -198,6 +273,7 @@ export const api = {
       raid_level: string
       ssh_key_ids: string[]
       confirm_data_loss: boolean
+      root_password?: string
     },
   ) =>
     request<Job>(`/api/v1/servers/${id}/reinstall`, {
@@ -234,11 +310,140 @@ export const api = {
   deleteSshKey: (id: string) =>
     request<void>(`/api/v1/ssh-keys/${id}`, { method: 'DELETE' }),
 
-  // --- admin ---
-  fleet: () => request<Record<string, unknown>[]>('/api/v1/admin/servers'),
-  fleetSummary: () => request<Record<string, unknown>>('/api/v1/admin/summary'),
-  adminJobs: () => request<Job[]>('/api/v1/admin/jobs'),
-  adminJob: (id: string) => request<JobDetail>(`/api/v1/admin/jobs/${id}`),
+  // --- admin: fleet ---
+  fleet: () => request<AdminServer[]>('/api/v1/admin/servers'),
+  fleetSummary: () => request<FleetSummary>('/api/v1/admin/summary'),
+  adminServer: (id: string) => request<AdminServer>(`/api/v1/admin/servers/${id}`),
+  createServer: (body: {
+    serial: string
+    cimc_ip: string
+    cimc_credential_ref: string
+    model?: string
+    datacenter?: string | null
+    rack?: string | null
+    rack_unit?: number | null
+    switch_name?: string | null
+    switch_port?: string | null
+    customer_vlan?: number | null
+    provisioning_mac?: string | null
+    notes?: string | null
+  }) => request<AdminServer>('/api/v1/admin/servers', { method: 'POST', body: JSON.stringify(body) }),
+  updateServer: (id: string, body: Record<string, unknown>) =>
+    request<AdminServer>(`/api/v1/admin/servers/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  changeServerState: (id: string, state: ServerState, reason?: string) =>
+    request<AdminServer>(`/api/v1/admin/servers/${id}/state`, {
+      method: 'POST',
+      body: JSON.stringify({ state, reason }),
+    }),
+  syncInventory: (id: string) =>
+    request<Job>(`/api/v1/admin/servers/${id}/inventory-sync`, { method: 'POST' }),
+  healthCheck: (id: string) =>
+    request<Job>(`/api/v1/admin/servers/${id}/health-check`, { method: 'POST' }),
+  wipe: (id: string, method: 'secure' | 'zero') =>
+    request<Job>(`/api/v1/admin/servers/${id}/wipe`, {
+      method: 'POST',
+      body: JSON.stringify({ confirm_data_loss: true, method }),
+    }),
+  suspend: (id: string, reason: string) =>
+    request<AdminServer>(`/api/v1/admin/servers/${id}/suspend?reason=${encodeURIComponent(reason)}`, {
+      method: 'POST',
+    }),
+  unsuspend: (id: string) =>
+    request<AdminServer>(`/api/v1/admin/servers/${id}/unsuspend`, { method: 'POST' }),
+  assignIp: (serverId: string, body: { block_id: string; address: string; is_primary: boolean }) =>
+    request<IPAssignment>(`/api/v1/admin/servers/${serverId}/ips`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  releaseIp: (assignmentId: string) =>
+    request<void>(`/api/v1/admin/ips/${assignmentId}`, { method: 'DELETE' }),
+
+  // --- admin: jobs ---
+  adminJobs: (params: { state?: string; server_id?: string } = {}) => {
+    const query = new URLSearchParams(
+      Object.entries(params).filter(([, v]) => v) as [string, string][],
+    ).toString()
+    return request<Job[]>(`/api/v1/admin/jobs${query ? `?${query}` : ''}`)
+  },
+  adminJob: (id: string) => request<AdminJobDetail>(`/api/v1/admin/jobs/${id}`),
+
+  // --- admin: customers & subscriptions ---
+  customers: () => request<AdminCustomer[]>('/api/v1/admin/customers'),
+  createCustomer: (body: {
+    email: string
+    password: string
+    company_name?: string | null
+    contact_name?: string | null
+    phone?: string | null
+    billing_ref?: string | null
+    is_admin?: boolean
+  }) => request<AdminCustomer>('/api/v1/admin/customers', { method: 'POST', body: JSON.stringify(body) }),
+  updateCustomer: (id: string, body: Record<string, unknown>) =>
+    request<AdminCustomer>(`/api/v1/admin/customers/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  subscriptions: (params: { customer_id?: string; server_id?: string; include_ended?: boolean } = {}) => {
+    const query = new URLSearchParams(
+      Object.entries(params)
+        .filter(([, v]) => v !== undefined && v !== false)
+        .map(([k, v]) => [k, String(v)]),
+    ).toString()
+    return request<Subscription[]>(`/api/v1/admin/subscriptions${query ? `?${query}` : ''}`)
+  },
+  createSubscription: (body: {
+    customer_id: string
+    server_id: string
+    plan_name: string
+    monthly_price?: number | null
+    currency?: string
+    bandwidth_quota_tb?: number | null
+  }) => request<Subscription>('/api/v1/admin/subscriptions', { method: 'POST', body: JSON.stringify(body) }),
+  endSubscription: (id: string) =>
+    request<Subscription>(`/api/v1/admin/subscriptions/${id}/end`, { method: 'POST' }),
+
+  // --- admin: IPAM ---
+  ipBlocks: () => request<IPBlock[]>('/api/v1/admin/ip-blocks'),
+  createIpBlock: (body: {
+    cidr: string
+    gateway?: string | null
+    routing_mode?: string
+    vlan?: number | null
+    datacenter?: string | null
+    source?: string | null
+  }) => request<IPBlock>('/api/v1/admin/ip-blocks', { method: 'POST', body: JSON.stringify(body) }),
+  freeAddresses: (blockId: string, limit = 32) =>
+    request<{ cidr: string; total_hosts: number; assigned: number; free_sample: string[] }>(
+      `/api/v1/admin/ip-blocks/${blockId}/free?limit=${limit}`,
+    ),
+
+  // --- admin: credentials ---
+  credentialBackend: () => request<{ backend: string; writable: boolean }>('/api/v1/admin/credentials/backend'),
+  checkCredential: (ref: string) =>
+    request<{ ref: string; resolves: boolean; username?: string }>(
+      `/api/v1/admin/credentials/check?ref=${encodeURIComponent(ref)}`,
+    ),
+  storeCredential: (body: { ref: string; username: string; password: string }) =>
+    request<{ ref: string; stored: boolean }>('/api/v1/admin/credentials', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  // --- admin: audit ---
+  audit: (params: { action?: string; target_id?: string; limit?: number } = {}) => {
+    const query = new URLSearchParams(
+      Object.entries(params).filter(([, v]) => v !== undefined).map(([k, v]) => [k, String(v)]),
+    ).toString()
+    return request<AuditEntry[]>(`/api/v1/admin/audit${query ? `?${query}` : ''}`)
+  },
+}
+
+export interface AuditEntry {
+  timestamp: string
+  actor_type: string
+  actor_label: string | null
+  action: string
+  target_type: string | null
+  target_id: string | null
+  source_ip: string | null
+  detail: Record<string, unknown>
 }
 
 /** URL for the SOL console websocket. The token rides in the query string

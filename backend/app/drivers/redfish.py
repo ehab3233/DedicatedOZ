@@ -95,10 +95,75 @@ class RedfishDriver(BMCDriver):
         self._timeout = timeout or settings.redfish_timeout_seconds
         self._session = requests.Session()
         self._session.verify = self._verify
-        self._session.auth = (credential.username, credential.password)
         self._session.headers.update({"Accept": "application/json", "OData-Version": "4.0"})
         self._system_path = system_path
         self._manager_path: str | None = None
+        #: Redfish session resource, deleted on close. None means basic auth.
+        self._auth_session_path: str | None = None
+        self._authenticated = False
+
+    # -- authentication ----------------------------------------------------
+
+    def _ensure_authenticated(self) -> None:
+        """Log in once with a Redfish session, falling back to basic auth.
+
+        This is not cosmetic. The CIMC opens an internal session for every
+        basic-auth request and caps them (four on 4.x). A health sweep doing a
+        dozen GETs per server exhausts that in seconds and every later call
+        fails with "max session limit reached" until they time out, which takes
+        several minutes. One session per driver instance, deleted on close,
+        keeps the BMC well inside its limit.
+        """
+        if self._authenticated:
+            return
+        self._authenticated = True  # set first so a failed login does not loop
+        url = urljoin(self.base_url, "/redfish/v1/SessionService/Sessions")
+        try:
+            resp = self._session.post(
+                url,
+                json={"UserName": self._cred.username, "Password": self._cred.password},
+                timeout=self._timeout,
+            )
+        except requests.RequestException as exc:
+            self._log(f"session login transport error: {exc}; using basic auth", level="warning")
+            self._session.auth = (self._cred.username, self._cred.password)
+            return
+
+        token = resp.headers.get("X-Auth-Token")
+        if resp.status_code in (200, 201) and token:
+            self._session.headers["X-Auth-Token"] = token
+            self._auth_session_path = resp.headers.get("Location") or (
+                (resp.json() or {}).get("@odata.id") if resp.content else None
+            )
+            self._log("redfish session established")
+            return
+
+        if resp.status_code == 401:
+            raise BMCError(
+                "BMC rejected the credentials",
+                request={"method": "POST", "url": url, "body": _REDACTED},
+                response={"status": 401},
+            )
+        # Older builds without a working SessionService: basic auth still works,
+        # it just has to be used sparingly.
+        self._log(
+            f"session login returned {resp.status_code}; falling back to basic auth",
+            level="warning",
+        )
+        self._session.auth = (self._cred.username, self._cred.password)
+
+    def _logout(self) -> None:
+        if not self._auth_session_path:
+            return
+        try:
+            self._session.delete(
+                urljoin(self.base_url, self._auth_session_path), timeout=self._timeout
+            )
+        except requests.RequestException:
+            pass
+        finally:
+            self._auth_session_path = None
+            self._session.headers.pop("X-Auth-Token", None)
 
     # -- transport ---------------------------------------------------------
 
@@ -111,6 +176,7 @@ class RedfishDriver(BMCDriver):
         expect: tuple[int, ...] = (200, 201, 202, 204),
         retries: int | None = None,
     ) -> dict:
+        self._ensure_authenticated()
         url = urljoin(self.base_url, path)
         attempts = settings.redfish_max_retries if retries is None else retries
         last_error: Exception | None = None
@@ -214,6 +280,9 @@ class RedfishDriver(BMCDriver):
 
     # -- power -------------------------------------------------------------
 
+    def log(self, message: str, *, level: str = "info", request=None, response=None) -> None:  # noqa: ANN001
+        self._log(message, level=level, request=request, response=response)
+
     def power_status(self) -> PowerStatus:
         system = self._get(self.system_path)
         raw_state = (system.get("PowerState") or "").lower()
@@ -255,29 +324,6 @@ class RedfishDriver(BMCDriver):
                 )
 
         self._request("POST", reset_path, json_body={"ResetType": reset_type})
-
-    def wait_for_power_state(self, want: str, timeout: int = 180, interval: int = 5) -> bool:
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            if self.power_status().state == want:
-                return True
-            time.sleep(interval)
-        return False
-
-    def power_cycle(self) -> None:
-        """Off, confirm, on.
-
-        A ForceRestart on a powered-off machine is a no-op on the M4, and
-        provisioning depends on the box actually coming up, so the transition
-        is driven explicitly instead.
-        """
-        if self.power_status().state == "on":
-            self.power(PowerAction.FORCE_OFF)
-            if not self.wait_for_power_state("off", timeout=120):
-                self._log("server did not report power off within 120s", level="warning")
-        # The M4's power supply needs a moment before it will accept an On.
-        time.sleep(5)
-        self.power(PowerAction.ON)
 
     # -- boot --------------------------------------------------------------
 
@@ -600,4 +646,5 @@ class RedfishDriver(BMCDriver):
     # -- lifecycle ---------------------------------------------------------
 
     def close(self) -> None:
+        self._logout()
         self._session.close()

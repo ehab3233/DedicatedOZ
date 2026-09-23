@@ -7,6 +7,7 @@ adding a driver, not editing the provisioning code.
 
 from __future__ import annotations
 
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Protocol
@@ -98,6 +99,40 @@ class BMCDriver(ABC):
 
     @abstractmethod
     def power(self, action: PowerAction) -> None: ...
+
+    def wait_for_power_state(self, want: str, timeout: int = 180, interval: int = 5) -> bool:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if self.power_status().state == want:
+                return True
+            time.sleep(interval)
+        return False
+
+    def power_cycle(self, *, settle_seconds: int = 5) -> None:
+        """Off, confirm, on.
+
+        A ForceRestart on a powered-off machine is a no-op on most BMCs, and
+        provisioning depends on the box actually coming up, so the transition
+        is driven explicitly instead.
+        """
+        if self.power_status().state == "on":
+            self.power(PowerAction.FORCE_OFF)
+            if not self.wait_for_power_state("off", timeout=120):
+                self.log("server did not report power off within 120s", level="warning")
+        # The power supply needs a moment before it will accept an On.
+        time.sleep(settle_seconds)
+        self.power(PowerAction.ON)
+
+    def log(
+        self,
+        message: str,
+        *,
+        level: str = "info",
+        request: dict | None = None,
+        response: dict | None = None,
+    ) -> None:
+        """Implementations override to route to their sink."""
+        return None
 
     @abstractmethod
     def set_boot_once(self, target: str) -> None:

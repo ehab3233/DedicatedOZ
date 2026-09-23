@@ -22,6 +22,7 @@ os.environ.setdefault("DOZ_CIMC_DEFAULT_USER", "admin")
 os.environ.setdefault("DOZ_CIMC_DEFAULT_PASS", "bench-password")
 os.environ.setdefault("DOZ_CONTROL_PLANE_URL", "http://10.10.0.5:8000")
 os.environ.setdefault("DOZ_BOOT_ASSET_BASE_URL", "http://10.10.0.5:8080")
+os.environ.setdefault("DOZ_TRUST_PROXY_HEADERS", "true")
 
 ADMIN_URL = os.environ.get(
     "DOZ_TEST_ADMIN_DATABASE_URL", "postgresql+psycopg://doz:doz@localhost:5432/postgres"

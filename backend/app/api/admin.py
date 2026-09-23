@@ -29,7 +29,9 @@ from app.schemas import (
     AdminJobDetailOut,
     AdminJobLogEntryOut,
     AdminServerOut,
+    IPAssignCreate,
     IPAssignmentOut,
+    IPBlockCreate,
     IPBlockOut,
     JobOut,
     OSTemplateCreate,
@@ -41,6 +43,8 @@ from app.schemas import (
     ServerUpdate,
     WipeRequest,
 )
+from app.secrets import SecretNotFoundError, get_secrets_backend
+from app.security import normalise_mac
 from app.services import jobs as job_service
 from app.services import provisioning
 from app.services.audit import record_audit
@@ -92,8 +96,6 @@ def create_server(
     The credential ref must already resolve in the secrets backend; a server
     whose password nobody can look up is worse than one that is not registered.
     """
-    from app.secrets import SecretNotFoundError, get_secrets_backend
-
     try:
         ipaddress.ip_address(payload.cimc_ip)
     except ValueError as exc:
@@ -111,8 +113,6 @@ def create_server(
 
     mac = payload.provisioning_mac
     if mac:
-        from app.security import normalise_mac
-
         try:
             mac = normalise_mac(mac)
         except ValueError as exc:
@@ -153,8 +153,6 @@ def update_server(
 
     changes = payload.model_dump(exclude_unset=True)
     if "provisioning_mac" in changes and changes["provisioning_mac"]:
-        from app.security import normalise_mac
-
         try:
             changes["provisioning_mac"] = normalise_mac(changes["provisioning_mac"])
         except ValueError as exc:
@@ -353,6 +351,44 @@ def suspend(
     return _admin_server(db, server)
 
 
+@router.post("/servers/{server_id}/unsuspend", response_model=AdminServerOut)
+def unsuspend(
+    server_id: uuid.UUID,
+    request: Request,
+    db: Session = Depends(get_db),
+    admin: Customer = Depends(current_admin),
+) -> AdminServerOut:
+    server = db.get(Server, server_id)
+    if server is None:
+        raise HTTPException(status_code=404, detail="server not found")
+    try:
+        transition_server(
+            db,
+            server,
+            ServerState.ACTIVE,
+            actor_type=ActorType.ADMIN,
+            actor_id=admin.id,
+            actor_label=admin.email,
+            reason="unsuspended",
+        )
+    except IllegalTransition as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    record_audit(
+        db,
+        action="server.unsuspended",
+        actor_type=ActorType.ADMIN,
+        actor_id=admin.id,
+        actor_label=admin.email,
+        target_type="server",
+        target_id=str(server_id),
+        source_ip=client_ip(request),
+        detail={"switch_port": server.switch_port, "port_shutdown_automated": False},
+    )
+    db.commit()
+    db.refresh(server)
+    return _admin_server(db, server)
+
+
 # ---------------------------------------------------------------------------
 # Jobs
 # ---------------------------------------------------------------------------
@@ -405,8 +441,64 @@ def get_job_detail(job_id: uuid.UUID, db: Session = Depends(get_db)) -> AdminJob
 
 
 @router.get("/ip-blocks", response_model=list[IPBlockOut])
-def list_ip_blocks(db: Session = Depends(get_db)) -> list[IPBlock]:
-    return list(db.execute(select(IPBlock).order_by(IPBlock.cidr)).scalars().all())
+def list_ip_blocks(db: Session = Depends(get_db)) -> list[IPBlockOut]:
+    assigned = dict(
+        db.execute(
+            select(IPAssignment.block_id, func.count())
+            .where(IPAssignment.released_at.is_(None))
+            .group_by(IPAssignment.block_id)
+        ).all()
+    )
+    out = []
+    for block in db.execute(select(IPBlock).order_by(IPBlock.cidr)).scalars().all():
+        item = IPBlockOut.model_validate(block)
+        network = ipaddress.ip_network(block.cidr, strict=False)
+        item.total_hosts = max(network.num_addresses - 2, 1)
+        item.assigned = assigned.get(block.id, 0)
+        out.append(item)
+    return out
+
+
+@router.post("/ip-blocks", response_model=IPBlockOut, status_code=201)
+def create_ip_block(
+    payload: IPBlockCreate,
+    request: Request,
+    db: Session = Depends(get_db),
+    admin: Customer = Depends(current_admin),
+) -> IPBlockOut:
+    try:
+        network = ipaddress.ip_network(payload.cidr, strict=True)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"not a valid CIDR: {exc}") from exc
+    if payload.gateway:
+        try:
+            gateway = ipaddress.ip_address(payload.gateway)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="gateway is not an IP") from exc
+        if gateway not in network:
+            raise HTTPException(status_code=400, detail="gateway is outside the block")
+    if db.execute(select(IPBlock).where(IPBlock.cidr == str(network))).scalar_one_or_none():
+        raise HTTPException(status_code=409, detail="block already exists")
+
+    block = IPBlock(
+        **{**payload.model_dump(), "cidr": str(network), "version": network.version}
+    )
+    db.add(block)
+    record_audit(
+        db,
+        action="ip_block.created",
+        actor_type=ActorType.ADMIN,
+        actor_id=admin.id,
+        actor_label=admin.email,
+        target_type="ip_block",
+        target_id=str(network),
+        source_ip=client_ip(request),
+    )
+    db.commit()
+    db.refresh(block)
+    item = IPBlockOut.model_validate(block)
+    item.total_hosts = max(network.num_addresses - 2, 1)
+    return item
 
 
 @router.get("/ip-blocks/{block_id}/free")
@@ -457,13 +549,12 @@ def free_addresses(
 @router.post("/servers/{server_id}/ips", response_model=IPAssignmentOut, status_code=201)
 def assign_ip(
     server_id: uuid.UUID,
-    block_id: uuid.UUID = Query(...),
-    address: str = Query(...),
-    is_primary: bool = Query(default=False),
-    request: Request = None,  # noqa: B008
+    payload: IPAssignCreate,
+    request: Request,
     db: Session = Depends(get_db),
     admin: Customer = Depends(current_admin),
 ) -> IPAssignmentOut:
+    block_id, address, is_primary = payload.block_id, payload.address, payload.is_primary
     server = db.get(Server, server_id)
     block = db.get(IPBlock, block_id)
     if server is None or block is None:
@@ -524,7 +615,7 @@ def assign_ip(
         actor_label=admin.email,
         target_type="server",
         target_id=str(server_id),
-        source_ip=client_ip(request) if request else None,
+        source_ip=client_ip(request),
         detail={"address": address, "primary": is_primary},
     )
     db.commit()
