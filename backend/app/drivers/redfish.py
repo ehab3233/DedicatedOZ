@@ -83,17 +83,26 @@ class RedfishDriver(BMCDriver):
         credential: BMCCredential,
         *,
         log: LogSink = null_sink,
+        port: int | None = None,
         system_path: str | None = None,
         verify_tls: bool | None = None,
         timeout: int | None = None,
+        retries: int | None = None,
     ) -> None:
         self.host = host
-        self.base_url = f"https://{host}"
+        self.base_url = f"https://{host}:{port}" if port else f"https://{host}"
+        self._retries = retries
         self._cred = credential
         self._log = log
         self._verify = settings.redfish_verify_tls if verify_tls is None else verify_tls
         self._timeout = timeout or settings.redfish_timeout_seconds
         self._session = requests.Session()
+        # BMC traffic must never pick up the environment: requests lets
+        # REQUESTS_CA_BUNDLE silently override verify=False (so every call to
+        # the CIMC's self-signed certificate fails), and would send BMC traffic
+        # through any HTTPS_PROXY it finds. Found by running against a real
+        # Redfish service from a host with a proxy configured.
+        self._session.trust_env = False
         self._session.verify = self._verify
         self._session.headers.update({"Accept": "application/json", "OData-Version": "4.0"})
         self._system_path = system_path
@@ -178,6 +187,8 @@ class RedfishDriver(BMCDriver):
     ) -> dict:
         self._ensure_authenticated()
         url = urljoin(self.base_url, path)
+        if retries is None:
+            retries = self._retries
         attempts = settings.redfish_max_retries if retries is None else retries
         last_error: Exception | None = None
         req_record = {"method": method, "url": url, "body": _redact(json_body)}
@@ -367,16 +378,53 @@ class RedfishDriver(BMCDriver):
             )
 
     def clear_boot_override(self) -> None:
-        self._request(
-            "PATCH",
-            self.system_path,
-            json_body={"Boot": {"BootSourceOverrideEnabled": "Disabled"}},
-        )
+        """Turn the override off.
+
+        Many implementations (sushy, some Dell and HPE builds) reject a PATCH
+        of `BootSourceOverrideEnabled` on its own and want the target in the
+        same body, so the conventional two-field form goes first and the bare
+        form is the fallback for BMCs that dislike `Target: None`.
+        """
+        try:
+            self._request(
+                "PATCH",
+                self.system_path,
+                json_body={
+                    "Boot": {
+                        "BootSourceOverrideEnabled": "Disabled",
+                        "BootSourceOverrideTarget": "None",
+                    }
+                },
+                retries=1,
+            )
+        except BMCError as exc:
+            if (exc.response or {}).get("status") != 400:
+                raise
+            self._request(
+                "PATCH",
+                self.system_path,
+                json_body={"Boot": {"BootSourceOverrideEnabled": "Disabled"}},
+            )
 
     # -- virtual media -----------------------------------------------------
 
+    def _virtual_media_collection(self) -> str:
+        """Where this BMC keeps virtual media.
+
+        Follow the links rather than assume a path: Redfish 1.0 (the M4's
+        CIMC) hangs VirtualMedia off the Manager, newer schemas moved it to
+        the ComputerSystem, and both publish a link to wherever it lives.
+        """
+        manager = self._get(self.manager_path)
+        link = (manager.get("VirtualMedia") or {}).get("@odata.id")
+        if link:
+            return link
+        system = self._get(self.system_path)
+        link = (system.get("VirtualMedia") or {}).get("@odata.id")
+        return link or f"{self.manager_path}/VirtualMedia"
+
     def _virtual_media_members(self) -> list[dict]:
-        collection = self._get(f"{self.manager_path}/VirtualMedia")
+        collection = self._get(self._virtual_media_collection())
         return collection.get("Members") or []
 
     def _find_removable_media(self) -> dict:

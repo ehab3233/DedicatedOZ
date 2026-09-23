@@ -18,7 +18,8 @@ from sqlalchemy import select
 
 from app.db import SessionLocal, engine
 from app.enums import InstallMethod, RaidLevel
-from app.models import Base, Customer, OSTemplate
+from app.models import Customer, OSTemplate
+from app.schema import upgrade_schema
 from app.security import hash_password
 
 #: The three-option list the spec calls for, plus the two hidden templates the
@@ -105,8 +106,10 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    print("creating schema...")
-    Base.metadata.create_all(engine)
+    print("creating / upgrading schema...")
+    added = upgrade_schema(engine)
+    for change in added:
+        print(f"  added column {change}")
 
     with SessionLocal() as db:
         if not args.skip_templates:

@@ -14,7 +14,7 @@ from app.drivers.base import (
     PowerStatus,
     null_sink,
 )
-from app.drivers.factory import get_driver
+from app.drivers.factory import get_driver, get_ipmi_driver
 
 __all__ = [
     "BMCDriver",
@@ -24,5 +24,6 @@ __all__ = [
     "LogSink",
     "PowerStatus",
     "get_driver",
+    "get_ipmi_driver",
     "null_sink",
 ]

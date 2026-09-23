@@ -1,0 +1,19 @@
+# ipmi_sim configuration for the DedicatedOZ BMC simulator.
+# Generated from lan.conf.in by run-sim.sh; do not edit the generated copy.
+name "doz-sim"
+set_working_mc 0x20
+  startlan 1
+    addr @ADDR@ @IPMI_PORT@
+    priv_limit admin
+    allowed_auths_callback none md2 md5 straight
+    allowed_auths_user none md2 md5 straight
+    allowed_auths_operator none md2 md5 straight
+    allowed_auths_admin none md2 md5 straight
+    guid a123456789abcdefa123456789abcdef
+  endlan
+  # SOL: ipmi_sim connects out to the fake serial port (fake_serial.py).
+  sol "telnet:127.0.0.1:@SERIAL_PORT@" 115200
+  # Power, reset and boot device go to chassis.sh, which keeps them in files.
+  chassis_control "@HERE@/chassis.sh 0x20"
+  user 1 true  ""        "unused"      user  10 none md2 md5 straight
+  user 2 true  "@USER@"  "@PASSWORD@"  admin 10 none md2 md5 straight

@@ -13,6 +13,7 @@ import {
   relativeTime,
 } from '../components'
 import { useAsync, usePolling } from '../hooks'
+import { PowerControls } from '../power'
 
 const ACTIVE_JOB_STATES = ['queued', 'running']
 
@@ -22,7 +23,7 @@ export default function ServerDetail({ isAdmin }: { isAdmin: boolean }) {
   const [notice, setNotice] = useState<string | null>(null)
   const [reinstalling, setReinstalling] = useState(false)
   const [rescuing, setRescuing] = useState(false)
-  const [busy, setBusy] = useState(false)
+  const [busy] = useState(false)
 
   const server = useAsync(() => api.server(id), [id])
   const jobs = useAsync(() => api.serverJobs(id), [id])
@@ -36,21 +37,6 @@ export default function ServerDetail({ isAdmin }: { isAdmin: boolean }) {
 
   // While a job is in flight the page is a progress display, so poll fast.
   usePolling(refresh, 5000, Boolean(activeJob))
-
-  async function act<T>(fn: () => Promise<T>, message: string) {
-    setBusy(true)
-    setError(null)
-    setNotice(null)
-    try {
-      await fn()
-      setNotice(message)
-      await refresh()
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
-    } finally {
-      setBusy(false)
-    }
-  }
 
   if (server.error) return <main className="page"><Banner kind="error">{server.error}</Banner></main>
   if (!server.data) return <main className="page"><Empty>Loading…</Empty></main>
@@ -78,44 +64,9 @@ export default function ServerDetail({ isAdmin }: { isAdmin: boolean }) {
 
       {activeJob && <ActiveJobCard job={activeJob} />}
 
-      {/* --- actions ---------------------------------------------------- */}
+      {/* --- power ------------------------------------------------------ */}
       <div className="card">
-        <div className="spread">
-          <div>
-            <strong>Power</strong>
-            <div className="subtle">
-              Currently {s.last_power_state ?? 'unknown'}
-              {activeJob ? ' — controls are locked while a job is running' : ''}
-            </div>
-          </div>
-          <div className="row">
-            <button
-              disabled={locked}
-              onClick={() => act(() => api.power(id, 'on'), 'Power on queued.')}
-            >
-              Power on
-            </button>
-            <button
-              disabled={locked}
-              onClick={() => act(() => api.power(id, 'off'), 'Graceful shutdown queued.')}
-            >
-              Shut down
-            </button>
-            <button
-              disabled={locked}
-              onClick={() => act(() => api.power(id, 'cycle'), 'Power cycle queued.')}
-            >
-              Power cycle
-            </button>
-            <button
-              className="danger"
-              disabled={locked}
-              onClick={() => act(() => api.power(id, 'reset'), 'Hard reset queued.')}
-            >
-              Hard reset
-            </button>
-          </div>
-        </div>
+        <PowerControls serverId={id} activeJob={activeJob ?? null} onChanged={refresh} pollMs={30000} />
       </div>
 
       <div className="card">

@@ -48,6 +48,8 @@ export default function Fleet() {
         <Stat label="Open abuse" value={summary.data?.open_abuse_reports ?? 0} />
       </div>
 
+      <SystemCard />
+
       <div className="row" style={{ margin: '20px 0 10px' }}>
         <input
           placeholder="Filter by serial, hostname, CIMC IP, rack, customer, state…"
@@ -297,5 +299,51 @@ function AddServerModal({ onClose, onCreated }: { onClose: () => void; onCreated
         </div>
       </form>
     </Modal>
+  )
+}
+
+// ---------------------------------------------------------------------------
+
+/**
+ * Is everything the panel depends on running? The question this answers is
+ * "I clicked restart and nothing happened": usually a queue with no worker.
+ */
+function SystemCard() {
+  const system = useAsync(() => api.system())
+  usePolling(system.reload, 30000, true)
+  const d = system.data
+  if (!d) return null
+
+  const problems: string[] = []
+  if (d.database !== 'ok') problems.push(`database: ${d.database}`)
+  if (d.redis !== 'ok') problems.push(`redis: ${d.redis}`)
+  for (const [name, q] of Object.entries(d.queues)) {
+    if (!q.workers.length) problems.push(`no worker on the "${name}" queue — ${q.handles} will sit queued`)
+  }
+  if (!d.ipmitool) problems.push('ipmitool is not installed: no IPMI power control and no serial console')
+
+  return (
+    <div className="card" style={{ marginTop: 16 }}>
+      <div className="spread">
+        <strong style={{ fontSize: 14 }}>System</strong>
+        <span className={`pill ${problems.length ? 'critical' : 'ok'}`}>
+          {problems.length ? `${problems.length} problem${problems.length > 1 ? 's' : ''}` : 'all running'}
+        </span>
+      </div>
+      {problems.length > 0 && (
+        <ul style={{ margin: '10px 0 0', paddingLeft: 18, color: 'var(--crit)', fontSize: 14 }}>
+          {problems.map((p) => <li key={p}>{p}</li>)}
+        </ul>
+      )}
+      <div className="row subtle" style={{ fontSize: 13, marginTop: 10, gap: 18 }}>
+        {Object.entries(d.queues).map(([name, q]) => (
+          <span key={name}>
+            {name}: {q.workers.length ? `${q.workers.length} worker${q.workers.length > 1 ? 's' : ''}` : 'none'}
+          </span>
+        ))}
+        <span>BMC control: {d.bmc_protocol}</span>
+        <span>{d.ipmitool ? d.ipmitool.version : 'no ipmitool'}</span>
+      </div>
+    </div>
   )
 }

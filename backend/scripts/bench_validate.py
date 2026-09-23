@@ -15,14 +15,20 @@ Talks to the BMC directly. No database, no queue, no control plane.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import getpass
 import os
+import pty
+import select
 import shutil
+import signal
 import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
 
+from app.drivers.cimc import CimcXmlApi
+from app.drivers.ipmi import IpmiDriver
 from app.drivers.redfish import RedfishDriver
 from app.secrets import BMCCredential
 
@@ -110,36 +116,45 @@ def test_firmware(driver: RedfishDriver) -> Result:
 # ---------------------------------------------------------------------------
 
 
-def test_pxe_boot(driver: RedfishDriver, *, power_cycle: bool) -> Result:
-    banner("2/5  One-time PXE boot override via Redfish")
-    print("  Setting BootSourceOverrideTarget=Pxe, Enabled=Once")
-    try:
-        driver.set_boot_once("pxe")
-    except Exception as exc:  # noqa: BLE001
+def test_pxe_boot(driver: RedfishDriver, ipmi: IpmiDriver, *, power_cycle: bool) -> Result:
+    banner("2/5  One-time PXE boot override (IPMI first, then Redfish)")
+    notes: list[str] = []
+    paths: dict[str, bool] = {}
+
+    # The platform sets boot device over IPMI first and Redfish second, and
+    # reads it back either way. Test both, so you know which one you rely on.
+    for label, target in (("IPMI", ipmi), ("Redfish", driver)):
+        try:
+            target.set_boot_once("pxe")
+            paths[label] = True
+            print(f"  {GREEN}{label}: override set and read back{RESET}")
+        except Exception as exc:  # noqa: BLE001
+            paths[label] = False
+            print(f"  {RED}{label}: {exc}{RESET}")
+    if not any(paths.values()):
         return Result(
             "pxe_override",
             False,
-            str(exc),
-            [
-                "If the PATCH is silently ignored, the install rail cannot work "
-                "and provisioning must go through vMedia instead."
-            ],
+            "neither IPMI nor Redfish could set a one-time PXE boot",
+            ["Run with --prepare to switch IPMI over LAN on, or check the CIMC "
+             "user is an administrator. Without this, installs go through vMedia."],
         )
-
-    print(f"  {GREEN}override accepted and read back correctly{RESET}")
+    for label, ok in paths.items():
+        if not ok:
+            notes.append(f"{label} could not set the boot device; the other path will be used")
 
     if not power_cycle:
         return Result(
             "pxe_override",
             True,
-            "override set (not power cycled)",
-            ["re-run with --power-cycle to confirm the machine actually netboots"],
+            "override set via " + " and ".join(k for k, v in paths.items() if v),
+            notes + ["re-run with --power-cycle to confirm the machine actually netboots"],
         )
 
     print("  Power cycling...")
-    driver.power_cycle()
+    (ipmi if paths.get("IPMI") else driver).power_cycle()
     print("  Waiting for power on...")
-    if not driver.wait_for_power_state("on", timeout=180):
+    if not (ipmi if paths.get("IPMI") else driver).wait_for_power_state("on", timeout=180):
         return Result("pxe_override", False, "server did not power on within 180s")
 
     print(f"\n  {YELLOW}Watch the serial console now.{RESET}")
@@ -157,7 +172,7 @@ def test_pxe_boot(driver: RedfishDriver, *, power_cycle: bool) -> Result:
                 "primary install path.",
             ],
         )
-    return Result("pxe_override", True, "machine netbooted on a one-time override")
+    return Result("pxe_override", True, "machine netbooted on a one-time override", notes)
 
 
 # ---------------------------------------------------------------------------
@@ -221,89 +236,124 @@ def test_virtual_media(driver: RedfishDriver, iso_url: str | None) -> Result:
 # ---------------------------------------------------------------------------
 
 
-def test_console(host: str, credential: BMCCredential) -> Result:
-    banner("4/5  Serial-over-LAN and vKVM")
+def test_console(host: str, credential: BMCCredential, ipmi: IpmiDriver) -> Result:
+    banner("4/5  IPMI power path, Serial-over-LAN, and vKVM")
     notes: list[str] = []
 
     if shutil.which("ipmitool") is None:
         return Result("console", False, "ipmitool is not installed on this machine")
 
-    env = {**os.environ, "IPMI_PASSWORD": credential.password}
-    base = ["ipmitool", "-I", "lanplus", "-H", host, "-U", credential.username, "-E"]
-
-    print("  Checking IPMI 2.0 reachability (chassis status)")
-    status = subprocess.run(  # noqa: S603
-        [*base, "chassis", "status"], capture_output=True, text=True, timeout=30, env=env
-    )
-    if status.returncode != 0:
+    print("  IPMI over LAN (the platform's primary power path)")
+    try:
+        started = time.monotonic()
+        state = ipmi.power_status().state
+        took = time.monotonic() - started
+        print(f"  {GREEN}power is {state}, read in {took * 1000:.0f} ms{RESET}")
+        if took > 3:
+            notes.append(
+                f"IPMI reads take {took:.1f}s. Try DOZ_IPMI_CIPHER_SUITE= (empty, auto) or 17."
+            )
+    except Exception as exc:  # noqa: BLE001
         return Result(
             "console",
             False,
-            f"ipmitool chassis status failed: {status.stderr.strip()}",
-            ["IPMI over LAN may be disabled in the CIMC; the SOL console needs it."],
+            f"IPMI failed: {exc}",
+            ["Run with --prepare (or CIMC web UI > Admin > Communication Services > "
+             "IPMI over LAN). The serial console and the fast power path need it."],
         )
-    print(f"  {GREEN}IPMI reachable{RESET}")
 
-    # Clear any session left behind by an earlier run -- the CIMC allows only
-    # one SOL session and will refuse the next connect until it is released.
-    subprocess.run(  # noqa: S603
-        [*base, "sol", "deactivate"], capture_output=True, text=True, timeout=30, env=env
-    )
-
-    print("  Opening a SOL session for 10 seconds")
     try:
-        sol = subprocess.Popen(  # noqa: S603
-            [*base, "sol", "activate"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            stdin=subprocess.DEVNULL,
-            text=True,
-            env=env,
+        info = ipmi.sol_info()
+        print(f"  SOL enabled: {info.get('Enabled')}, "
+              f"bit rate: {info.get('Non-Volatile Bit Rate (kbps)')} kbps")
+        if info.get("Enabled", "").lower() != "true":
+            notes.append("SOL is disabled. Run with --prepare, or Prepare BMC in the panel.")
+    except Exception as exc:  # noqa: BLE001
+        notes.append(f"could not read SOL settings: {exc}")
+
+    # Exactly how the console bridge runs it: ipmitool on a pty.
+    ipmi.sol_deactivate()
+    print("  Opening a SOL session on a pty for 10 seconds (press nothing)")
+    master, slave = pty.openpty()
+    try:
+        proc = subprocess.Popen(  # noqa: S603
+            [*ipmi.base_command(), "-e", "\x1d", "sol", "activate"],
+            stdin=slave, stdout=slave, stderr=slave, env=ipmi.environment(),
+            start_new_session=True, close_fds=True,
         )
     except OSError as exc:
         return Result("console", False, f"could not start ipmitool: {exc}")
+    os.close(slave)
+    output = b""
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        ready, _, _ = select.select([master], [], [], 0.25)
+        if ready:
+            try:
+                output += os.read(master, 4096)
+            except OSError:
+                break
+    with contextlib.suppress(ProcessLookupError):
+        os.killpg(proc.pid, signal.SIGTERM)
+    os.close(master)
+    ipmi.sol_deactivate()
+    text = output.decode(errors="replace")
 
-    time.sleep(10)
-    sol.terminate()
-    output = ""
-    try:
-        output = sol.communicate(timeout=10)[0] or ""
-    except subprocess.TimeoutExpired:
-        sol.kill()
-    subprocess.run(  # noqa: S603
-        [*base, "sol", "deactivate"], capture_output=True, text=True, timeout=30, env=env
-    )
-
-    if "SOL payload already active" in output:
-        return Result(
-            "console",
-            False,
-            "SOL payload already active",
-            ["Another session holds the console. The platform must always "
-             "`sol deactivate` when a websocket closes, or consoles wedge."],
-        )
-    if "Error" in output and "activate" in output.lower():
-        return Result("console", False, f"SOL activate failed: {output.strip()[:200]}")
-
+    if "already active" in text:
+        return Result("console", False, "SOL payload already active",
+                      ["Another session holds the console; close it and re-run."])
+    if "SOL Session operational" not in text:
+        return Result("console", False, f"SOL did not start: {text.strip()[:200]}")
     print(f"  {GREEN}SOL session opened and released cleanly{RESET}")
-    if not output.strip():
+    if len(text.strip()) < 60:
         notes.append(
-            "SOL produced no output. That is expected on a powered-off machine, "
-            "but confirm you see POST output with the server running."
+            "SOL produced no host output. Expected if the server is off or sitting at "
+            "a login prompt; with it booting you should see POST. If you never do, "
+            "BIOS console redirection is off -- --prepare sets it (next boot)."
         )
 
-    print(f"\n  {DIM}vKVM cannot be tested headlessly. Open the CIMC web UI and{RESET}")
-    print(f"  {DIM}launch the HTML5 KVM console manually.{RESET}")
-    answer = input("  Does the HTML5 vKVM launch and show video? [y/N/skip] ").strip().lower()
+    print("\n  vKVM: asking the CIMC for one-time launch tokens")
+    try:
+        with CimcXmlApi(host, credential) as api:
+            links = api.kvm_launch()
+            print(f"  XML API ok (firmware {api.version})")
+    except Exception as exc:  # noqa: BLE001
+        notes.append(f"KVM tokens unavailable ({exc}); the CIMC web UI still works by hand")
+        return Result("console", True, "IPMI and SOL work; KVM tokens did not", notes)
+
+    if links["html5"]:
+        print("  HTML5 viewer found. Open this in a browser within a minute:")
+        print(f"    {links['html5']}")
+    else:
+        print("  No HTML5 viewer at any known path. Java launcher:\n    " + links["java"])
+        notes.append("set DOZ_KVM_URL_TEMPLATE once you know your firmware's HTML5 viewer URL")
+    answer = input("  Did the KVM viewer open and show video? [y/N/skip] ").strip().lower()
     if answer == "skip":
-        notes.append("vKVM not tested; it is a Phase 2 feature, so this is survivable")
+        notes.append("vKVM not tested")
     elif answer != "y":
         notes.append(
-            "vKVM does not work. Phase 2 proxying will not be possible without it; "
-            "SOL then has to carry all console support."
+            "The KVM link did not work. The panel's CIMC web UI link still does; "
+            "please note what URL the CIMC's own Launch KVM button opens and set "
+            "DOZ_KVM_URL_TEMPLATE to match."
         )
+    return Result("console", True, "IPMI, SOL and KVM tokens work", notes)
 
-    return Result("console", True, "SOL works", notes)
+
+def prepare_bmc(host: str, credential: BMCCredential) -> None:
+    """What the panel's Prepare BMC job does, for a CIMC not yet in the panel."""
+    banner("Preparing the CIMC (IPMI over LAN, SOL, console redirection)")
+    with CimcXmlApi(host, credential) as api:
+        for label, fn in (
+            ("IPMI over LAN", api.enable_ipmi_over_lan),
+            ("Serial-over-LAN 115200 COM0", api.enable_sol),
+            ("BIOS console redirection (next boot)", api.set_console_redirection),
+        ):
+            try:
+                fn()
+                print(f"  {GREEN}{label}: set{RESET}")
+            except Exception as exc:  # noqa: BLE001
+                print(f"  {RED}{label}: {exc}{RESET}")
+    time.sleep(3)
 
 
 # ---------------------------------------------------------------------------
@@ -372,6 +422,12 @@ def main() -> int:
         help="actually reboot the server during tests 2 and 3",
     )
     parser.add_argument("--verify-tls", action="store_true")
+    parser.add_argument(
+        "--prepare",
+        action="store_true",
+        help="first switch on IPMI over LAN, SOL and BIOS console redirection "
+             "(what the panel's Prepare BMC does)",
+    )
     parser.add_argument("--verbose", action="store_true", help="print every BMC exchange")
     args = parser.parse_args()
 
@@ -391,28 +447,32 @@ def main() -> int:
         log=verbose_sink if args.verbose else (lambda *a, **k: None),
         verify_tls=args.verify_tls,
     )
+    ipmi = IpmiDriver(
+        args.host, credential, log=verbose_sink if args.verbose else (lambda *a, **k: None)
+    )
 
     results: list[Result] = []
     try:
+        if args.prepare:
+            prepare_bmc(args.host, credential)
         results.append(test_firmware(driver))
-        results.append(test_pxe_boot(driver, power_cycle=args.power_cycle))
+        results.append(test_pxe_boot(driver, ipmi, power_cycle=args.power_cycle))
         if args.power_cycle:
             results.append(test_virtual_media(driver, args.iso_url))
         else:
             print(f"\n{YELLOW}3/5 virtual media skipped without --power-cycle{RESET}")
             results.append(Result("virtual_media", False, "skipped (no --power-cycle)"))
-        results.append(test_console(args.host, credential))
+        results.append(test_console(args.host, credential, ipmi))
         results.append(test_storcli())
     except KeyboardInterrupt:
         print("\ninterrupted")
         return 130
     finally:
         # Never leave a bench machine with a boot override set.
-        try:
-            driver.clear_boot_override()
-            driver.eject_virtual_media()
-        except Exception:  # noqa: BLE001
-            print(f"{YELLOW}warning: could not clear boot override / eject media{RESET}")
+        for cleanup in (ipmi.clear_boot_override, driver.clear_boot_override,
+                        driver.eject_virtual_media):
+            with contextlib.suppress(Exception):
+                cleanup()
         driver.close()
 
     banner("Summary")

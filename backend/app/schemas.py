@@ -210,6 +210,9 @@ class ServerDetailOut(ServerOut):
 class AdminServerOut(ServerDetailOut):
     cimc_ip: IPStr
     cimc_credential_ref: str
+    bmc_protocol: str | None = None
+    ipmi_port: int | None = None
+    redfish_port: int | None = None
     cimc_firmware: str | None
     bios_version: str | None
     rack: str | None
@@ -223,10 +226,16 @@ class AdminServerOut(ServerDetailOut):
     customer_email: str | None = None
 
 
+BMCProtocol = Field(default=None, pattern="^(auto|redfish|ipmi)$")
+
+
 class ServerCreate(BaseModel):
     serial: str = Field(min_length=1, max_length=64)
     cimc_ip: str
     cimc_credential_ref: str = Field(min_length=1, max_length=255)
+    bmc_protocol: str | None = BMCProtocol
+    ipmi_port: int | None = Field(default=None, ge=1, le=65535)
+    redfish_port: int | None = Field(default=None, ge=1, le=65535)
     model: str = "UCSC-C220-M4S"
     datacenter: str | None = None
     rack: str | None = None
@@ -240,6 +249,10 @@ class ServerCreate(BaseModel):
 
 class ServerUpdate(BaseModel):
     hostname: str | None = None
+    cimc_ip: str | None = None
+    bmc_protocol: str | None = BMCProtocol
+    ipmi_port: int | None = Field(default=None, ge=1, le=65535)
+    redfish_port: int | None = Field(default=None, ge=1, le=65535)
     datacenter: str | None = None
     rack: str | None = None
     rack_unit: int | None = Field(default=None, ge=1, le=60)
@@ -261,16 +274,30 @@ class ServerStateChange(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+POWER_ACTIONS = ("on", "off", "force_off", "reset", "cycle")
+
+
 class PowerRequest(BaseModel):
-    #: on | off | cycle | reset
+    #: on | off (graceful, ACPI) | force_off | reset | cycle
     action: str
+    #: Admin only: run even though another job holds the server -- for a
+    #: machine stuck mid-install. Ignored for customers.
+    force: bool = False
 
     @field_validator("action")
     @classmethod
     def _known_action(cls, value: str) -> str:
-        if value not in {"on", "off", "cycle", "reset"}:
-            raise ValueError("action must be one of: on, off, cycle, reset")
+        if value not in POWER_ACTIONS:
+            raise ValueError("action must be one of: " + ", ".join(POWER_ACTIONS))
         return value
+
+
+class PowerStateOut(BaseModel):
+    state: str
+    via: str | None = None
+    checked_at: str
+    error: str | None = None
+    cached: bool = False
 
 
 class ReinstallRequest(BaseModel):

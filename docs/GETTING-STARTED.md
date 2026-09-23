@@ -47,19 +47,55 @@ You cannot run two authoritative DHCP servers on one network. Pick one.
 
 ## 2. Install the management server
 
-On the fresh Ubuntu VM, with a static IP already configured:
+On the fresh Ubuntu 22.04 or 24.04 VM, with a static IP already configured:
 
 ```sh
 sudo apt install -y git
 git clone https://github.com/ehab3233/DedicatedOZ.git
 cd DedicatedOZ
-sudo ./deploy/install-management-server.sh --ip 10.0.0.5 --dhcp-range 10.0.0.200,10.0.0.249
+sudo ./doz.sh install --ip 10.0.0.5 --dhcp-range 10.0.0.200,10.0.0.249
 # or, with your router still doing DHCP:
-sudo ./deploy/install-management-server.sh --ip 10.0.0.5 --proxy-dhcp
+sudo ./doz.sh install --ip 10.0.0.5 --proxy-dhcp
+# or, no netboot yet -- just the panel, power and consoles:
+sudo ./doz.sh install --ip 10.0.0.5 --no-pxe
 ```
 
 About ten minutes. It ends with the portal URL and a one-time admin password.
 Log in at `http://10.0.0.5` straight away and confirm you get the Manage tab.
+
+Everything runs as one Ubuntu service, `doz`, enabled at boot:
+
+```sh
+sudo systemctl status doz        # the umbrella service
+sudo systemctl restart doz       # restarts every part
+/opt/doz/doz.sh status           # each part, and whether every job queue has a worker
+/opt/doz/doz.sh logs             # follow all the logs (journalctl -u 'doz*')
+```
+
+The parts are the API, three workers (power, provisioning, polling -- separate
+so a pile of reinstalls can never sit in front of a power button), the
+scheduler, and PXE. **Manage → Fleet** shows the same thing in its System
+card; if a queue has no worker, it says so in red.
+
+To update later: `git pull && sudo ./doz.sh update`. The settings from the
+first install are remembered in `/etc/doz/install.conf`; secrets in
+`/etc/doz/doz.env` are never overwritten.
+
+### No hardware on the bench yet?
+
+Try power control and the serial console against a simulated BMC first:
+
+```sh
+sudo apt install --no-install-recommends openipmi
+sudo /opt/doz/doz.sh sim start
+```
+
+That starts OpenIPMI's `ipmi_sim` -- a real IPMI-over-LAN implementation --
+with a pretend server behind it, and registers it as **SIM-0001**. Open it in
+the panel: Power on / Shut down / Force off / Reset / Power cycle work, and
+**Open serial console** shows a POST screen and a login prompt when you reset
+it. `sudo /opt/doz/deploy/smoke-test.sh` runs the whole check automatically.
+Remove it with `sudo /opt/doz/doz.sh sim remove`.
 
 Then fetch the OS images and build the installer ramdisk. These take a while
 and a couple of gigabytes, which is why they are separate:
@@ -103,11 +139,18 @@ From the management VM, confirm the CIMC answers:
 
 ```sh
 curl -sk https://10.0.0.101/redfish/v1/ | head -c 300
-ipmitool -I lanplus -H 10.0.0.101 -U admin -P 'the-password' chassis status
+IPMI_PASSWORD='the-password' ipmitool -I lanplus -H 10.0.0.101 -U admin -E -C 3 chassis status
 ```
 
-Both should return something sensible. If IPMI fails, open the CIMC web UI
-(`https://10.0.0.101`), Admin → Communication Services, and enable IPMI over LAN.
+The Redfish call should return JSON. The IPMI one may fail at this point:
+IPMI over LAN and Serial-over-LAN are **off by default** on many CIMC builds.
+You do not need to fix that by hand -- step 5's **Prepare BMC** switches both
+on. (If you would rather: CIMC web UI → Admin → Communication Services → IPMI
+over LAN, and Server → Remote Presence → Serial over LAN, 115200.)
+
+`-C 3` pins the IPMI cipher suite. Without it, ipmitool 1.8.19 probes for the
+best one on every call, and a BMC that does not answer the probe costs ten
+seconds each time. The platform pins it for the same reason.
 
 **Firmware.** Note the CIMC version on the web UI's summary page. The fleet
 target is **4.1(2f)**, the last M4 release. If this server is lower, upgrade
@@ -161,6 +204,14 @@ and watch it: within a minute the CPU, RAM, firmware, drives and NICs appear,
 and one MAC is marked **PXE**. If more than one NIC came back, pick the one you
 cabled with **Use for PXE**.
 
+Then click **Prepare BMC**. Over the CIMC's XML API it switches on IPMI over
+LAN, switches on Serial-over-LAN at 115200 on COM0, and points the BIOS
+console redirection at the same port (that last one takes effect at the next
+boot). It then proves IPMI works by reading the power state, and reads back
+the SOL settings. The job log shows each step. If the job fails, the message
+says which of the usual three it is: wrong password, IPMI still off, or UDP
+623 blocked between the VM and the CIMC.
+
 If the sync fails, the job's raw log shows exactly which Redfish call the CIMC
 refused and what it said. The usual causes: wrong password, IPMI/Redfish not
 enabled, or the VM cannot reach the CIMC IP.
@@ -175,13 +226,47 @@ Back on the server page → **Assign address** → pick the block, take the firs
 free suggestion, tick **Primary**. The installer will configure this address
 statically, so the server comes up exactly where you expect.
 
-## 7. Test power control
+## 7. Test power control and the consoles
 
-Server page → **Cycle**. A job appears; within thirty seconds it should read
-"power is on → power cycling → confirming power state → succeeded". Then
-watch the serial console: with no job waiting, PXE fires, iPXE chains to the
-management server, gets "No provisioning job for this host. Booting from local
-disk", and falls through to whatever is on disk.
+The **Power** card on the server page reads the power state live from the BMC
+(the badge says which protocol answered and when). The buttons:
+
+| Button | What the BMC is asked to do |
+|---|---|
+| Power on | Power on. |
+| Shut down | Press the power button (ACPI). The OS decides; the job reports if it has not shut down after five minutes. Never escalated automatically. |
+| Force off | Cut power immediately. |
+| Reset | Hard reset. If the server is off, it is powered on instead. |
+| Power cycle | Off, confirm off, wait, on. |
+
+Each click queues a job, and the card follows it to the end and re-reads the
+BMC, so what it shows is what happened. Power goes over IPMI first (tens of
+milliseconds per command) and falls back to Redfish if IPMI is not answering;
+the job log records which one did the work. Per server, **Edit** can pin a
+server to IPMI only or Redfish only.
+
+If a job is holding the server -- a reinstall that hung -- admins get **reset
+anyway** / **force off anyway** under the buttons. It is audited as a forced
+action.
+
+**Serial console.** Click **Open serial console**. The power buttons are on the
+same page, so press **Reset** and watch POST, the BIOS, the boot loader and the
+kernel scroll past, then log in. Keys a browser swallows (F2 setup, F6 boot
+menu, F12 network boot, BREAK) are buttons above the terminal. The BMC allows
+one console viewer; if someone else has it, you are offered **Take over**.
+Idle consoles close after 30 minutes to free the slot.
+
+**KVM.** **Launch KVM** gets one-time tokens from the CIMC and opens its HTML5
+viewer in a new tab. Your browser talks to the CIMC directly, which works on
+the flat network. Open **CIMC web UI** once first and accept its self-signed
+certificate, or the viewer tab is blocked. If your firmware keeps the viewer
+somewhere unexpected, the panel falls back to the Java launcher and the web UI
+(and `DOZ_KVM_URL_TEMPLATE` pins the path once you know it).
+
+With no job waiting, a reset also shows the netboot rail at work on the
+console: PXE fires, iPXE chains to the management server, gets "No
+provisioning job for this host. Booting from local disk", and falls through to
+whatever is on disk.
 
 That fall-through is the whole architecture working end to end: DHCP, TFTP,
 iPXE, the control plane, and the BMC. If it does not happen, nothing else
@@ -260,6 +345,10 @@ Honest list, so nobody is surprised:
   customer's power controls, and writes an audit line saying the port still
   needs downing. Do it by hand until the switch model is picked and the hook
   is written.
+- **KVM is for admins on the flat network.** The browser has to reach the
+  CIMC. Customers get the serial console, which goes through the platform;
+  giving them KVM needs a proxy in front of the CIMC, which comes with the
+  move off the flat network.
 - **Bandwidth graphs are empty.** The storage and API exist; the poller that
   reads switch counters does not, for the same reason.
 - **No email.** New-customer passwords are shown to you once in the panel;

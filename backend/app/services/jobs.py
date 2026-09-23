@@ -32,8 +32,10 @@ EXCLUSIVE_JOB_TYPES = {
     JobType.WIPE,
     JobType.POWER_ON,
     JobType.POWER_OFF,
+    JobType.POWER_FORCE_OFF,
     JobType.POWER_CYCLE,
     JobType.POWER_RESET,
+    JobType.BMC_SETUP,
 }
 
 
@@ -67,13 +69,18 @@ def create_job(
     requested_by_id: uuid.UUID | None = None,
     requested_by_type: ActorType = ActorType.CUSTOMER,
     with_callback_token: bool = False,
+    allow_concurrent: bool = False,
 ) -> tuple[Job, str | None]:
     """Create a queued job. Returns `(job, callback_token_or_None)`.
 
     The plaintext callback token is returned once and never stored; the caller
     hands it to the installer through the boot script.
+
+    `allow_concurrent` skips the one-job-per-server lock. It exists for one
+    case: an operator resetting a machine that is stuck mid-install, where
+    waiting for the install job to time out is the wrong answer.
     """
-    if server_id and job_type in EXCLUSIVE_JOB_TYPES:
+    if server_id and job_type in EXCLUSIVE_JOB_TYPES and not allow_concurrent:
         existing = active_job_for_server(db, server_id)
         if existing:
             raise JobConflict(

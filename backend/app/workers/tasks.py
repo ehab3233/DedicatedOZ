@@ -18,7 +18,10 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.db import session_scope
-from app.drivers import BMCError, LogSink, get_driver, null_sink
+from app.drivers import BMCError, LogSink, get_driver, get_ipmi_driver, null_sink
+from app.drivers.cimc import CimcXmlApi
+from app.drivers.factory import credential_for
+from app.drivers.fallback import FallbackDriver, protocol_label
 from app.drivers.redfish import RedfishDriver
 from app.enums import ActorType, JobState, JobType, PowerAction, ServerState
 from app.models import Job, Server
@@ -116,10 +119,12 @@ def _check_cancel(db: Session, job: Job) -> None:
 # Power
 # ---------------------------------------------------------------------------
 
-_POWER_ACTIONS: dict[str, PowerAction] = {
-    JobType.POWER_ON.value: PowerAction.ON,
-    JobType.POWER_OFF.value: PowerAction.OFF,
-    JobType.POWER_RESET.value: PowerAction.FORCE_RESTART,
+#: Job type -> (what to ask the BMC for, the power state that means "done").
+_POWER_ACTIONS: dict[str, tuple[PowerAction, str]] = {
+    JobType.POWER_ON.value: (PowerAction.ON, "on"),
+    JobType.POWER_OFF.value: (PowerAction.OFF, "off"),
+    JobType.POWER_FORCE_OFF.value: (PowerAction.FORCE_OFF, "off"),
+    JobType.POWER_RESET.value: (PowerAction.FORCE_RESTART, "on"),
 }
 
 
@@ -135,52 +140,182 @@ def power_task(self, job_id: str) -> dict:  # noqa: ANN001
         sink = job_service.make_log_sink(db, job)
         with get_driver(server, log=sink) as driver:
             before = driver.power_status()
-            job_service.set_stage(db, job, f"power is {before.state}", progress=10)
+            job_service.set_stage(
+                db, job, f"power is {before.state} (via {protocol_label(driver)})", progress=10
+            )
             db.commit()
 
+            timeout = 180
             if job.type == JobType.POWER_CYCLE.value:
                 job_service.set_stage(db, job, "power cycling", progress=40)
                 db.commit()
                 driver.power_cycle()
                 want = "on"
             else:
-                action = _POWER_ACTIONS[job.type]
-                if (
-                    (action is PowerAction.ON and before.state == "on")
-                    or (action is PowerAction.OFF and before.state == "off")
-                ):
-                    job_service.set_stage(
-                        db, job, f"already powered {before.state}", progress=100
-                    )
-                    job.result = {"power_state": before.state, "no_op": True}
+                action, want = _POWER_ACTIONS[job.type]
+                if action is not PowerAction.FORCE_RESTART and before.state == want:
+                    job_service.set_stage(db, job, f"already {want}", progress=100)
+                    server.last_power_state = before.state
+                    db.add(server)
+                    job.result = {"power_state": before.state, "no_op": True,
+                                  "via": protocol_label(driver)}
                     db.commit()
-                    return {"power_state": before.state, "no_op": True}
-                job_service.set_stage(db, job, f"sending {action.value}", progress=40)
+                    return job.result
+                if action is PowerAction.FORCE_RESTART and before.state == "off":
+                    # A reset of a machine that is off is a no-op on most BMCs,
+                    # and the person who clicked "reset" wants it running.
+                    job_service.log(
+                        db, job, "server was off; powering on instead of resetting",
+                        customer_visible=True,
+                    )
+                    action = PowerAction.ON
+                if action is PowerAction.OFF:
+                    timeout = settings.graceful_shutdown_timeout_seconds
+                label = {
+                    PowerAction.ON: "powering on",
+                    PowerAction.OFF: "asking the OS to shut down (ACPI)",
+                    PowerAction.FORCE_OFF: "forcing power off",
+                    PowerAction.FORCE_RESTART: "resetting",
+                }[action]
+                job_service.set_stage(db, job, label, progress=40)
                 db.commit()
                 driver.power(action)
-                want = {"on": "on", "off": "off", "force_restart": "on"}[action.value]
 
-            job_service.set_stage(db, job, "confirming power state", progress=75)
+            job_service.set_stage(db, job, f"waiting for power {want}", progress=75)
             db.commit()
-            reached = driver.wait_for_power_state(want, timeout=180)
+            reached = driver.wait_for_power_state(want, timeout=timeout, interval=3)
             final = driver.power_status()
             server.last_power_state = final.state
             db.add(server)
+            job.result = {
+                "power_state": final.state,
+                "reached_target": reached,
+                "via": protocol_label(driver),
+            }
+            db.commit()
 
-            job.result = {"power_state": final.state, "reached_target": reached}
             if not reached:
-                # Graceful shutdown depends on the guest OS cooperating. Report
-                # it rather than pretending the job succeeded.
-                job_service.log(
-                    db,
-                    job,
-                    f"server did not reach '{want}' within 180s (now: {final.state})",
-                    level="warning",
-                    customer_visible=True,
+                if job.type == JobType.POWER_OFF.value:
+                    raise RuntimeError(
+                        f"the operating system did not shut down within {timeout}s; "
+                        "it may be ignoring ACPI. Use Force off to cut power."
+                    )
+                raise RuntimeError(
+                    f"server is {final.state}, not {want}, {timeout}s after the command"
                 )
+            job_service.set_stage(db, job, f"power is {final.state}", progress=100)
             db.commit()
             return job.result
     return {"skipped": True}
+
+
+# ---------------------------------------------------------------------------
+# BMC setup
+# ---------------------------------------------------------------------------
+
+
+@celery_app.task(name="doz.power.bmc_setup", bind=True, max_retries=0)
+def bmc_setup_task(self, job_id: str) -> dict:  # noqa: ANN001
+    """Make a CIMC ready for the platform, then prove it.
+
+    1. Over the CIMC XML API: IPMI over LAN on, SOL on at 115200 on COM0, BIOS
+       console redirection to COM0 (that last one applies at the next boot).
+    2. Over IPMI: read power state and SOL settings. If the XML API was not
+       available (not a Cisco, or the XML API is switched off) but IPMI works,
+       SOL is enabled over IPMI instead.
+
+    Steps that fail are logged and the job carries on; it fails only if IPMI
+    does not work at the end, because that is what power and console need.
+    """
+    with job_runner(job_id) as ctx:
+        if ctx is None:
+            return {"skipped": True}
+        db, job, server = ctx
+        if server is None:
+            raise RuntimeError("bmc setup job has no server")
+
+        sink = job_service.make_log_sink(db, job)
+        credential = credential_for(server)
+        result: dict = {"xml_api": {}, "ipmi": None, "sol": None}
+
+        job_service.set_stage(db, job, "configuring the CIMC over the XML API", progress=10)
+        db.commit()
+        try:
+            with CimcXmlApi(
+                str(server.cimc_ip), credential, port=server.redfish_port, log=sink
+            ) as api:
+                result["xml_api"]["firmware"] = api.version
+                for step, fn in (
+                    ("ipmi_over_lan", api.enable_ipmi_over_lan),
+                    ("sol", api.enable_sol),
+                    ("bios_console_redirection", api.set_console_redirection),
+                ):
+                    try:
+                        applied = fn()
+                        result["xml_api"][step] = "ok"
+                        job_service.log(
+                            db, job, f"{step.replace('_', ' ')}: set {applied or ''}".strip(),
+                            customer_visible=False,
+                        )
+                    except BMCError as exc:
+                        result["xml_api"][step] = f"failed: {exc}"
+                        job_service.log(db, job, f"{step}: {exc}", level="warning")
+                    db.commit()
+        except BMCError as exc:
+            result["xml_api"]["error"] = str(exc)
+            job_service.log(
+                db, job, f"CIMC XML API not available ({exc}); continuing with IPMI only",
+                level="warning", customer_visible=True,
+            )
+            db.commit()
+
+        job_service.set_stage(db, job, "checking IPMI over LAN", progress=50)
+        db.commit()
+        ipmi = get_ipmi_driver(server, log=sink)
+        # IPMI can take a moment to come up after being switched on.
+        last_error: BMCError | None = None
+        for _ in range(5):
+            try:
+                power = ipmi.power_status()
+                result["ipmi"] = f"ok (power {power.state})"
+                server.last_power_state = power.state
+                last_error = None
+                break
+            except BMCError as exc:
+                last_error = exc
+                time.sleep(3)
+        if last_error is not None:
+            result["ipmi"] = f"failed: {last_error}"
+            job.result = result
+            db.commit()
+            raise RuntimeError(f"IPMI over LAN is not working: {last_error}")
+
+        job_service.set_stage(db, job, "checking Serial-over-LAN", progress=75)
+        db.commit()
+        try:
+            info = ipmi.sol_info()
+            if info.get("Enabled", "").lower() != "true":
+                job_service.log(db, job, "SOL disabled; enabling it over IPMI", level="warning")
+                info = ipmi.sol_enable()
+            result["sol"] = {
+                "enabled": info.get("Enabled"),
+                "bit_rate_kbps": info.get("Non-Volatile Bit Rate (kbps)"),
+                "port": info.get("Payload Port"),
+            }
+        except BMCError as exc:
+            result["sol"] = f"failed: {exc}"
+            job_service.log(db, job, f"SOL check failed: {exc}", level="warning",
+                            customer_visible=True)
+
+        job.result = result
+        db.add(server)
+        job_service.set_stage(
+            db, job,
+            "BMC ready. Console redirection takes effect at the next boot.",
+            progress=100,
+        )
+        db.commit()
+        return result
 
 
 # ---------------------------------------------------------------------------
@@ -371,8 +506,9 @@ def _sync_inventory(db: Session, server: Server, sink: LogSink = null_sink) -> d
     """
     with get_driver(server, log=sink) as driver:
         inv = driver.inventory()
-        if isinstance(driver, RedfishDriver):
-            server.redfish_system_path = driver.system_path
+        redfish = driver.rich if isinstance(driver, FallbackDriver) else driver
+        if isinstance(redfish, RedfishDriver):
+            server.redfish_system_path = redfish.system_path
 
     server.cpu_model = inv.cpu_model or server.cpu_model
     server.cpu_count = inv.cpu_count or server.cpu_count
@@ -509,8 +645,10 @@ def reap_jobs_task() -> dict:
 TASK_FOR_JOB_TYPE: dict[JobType, Callable] = {
     JobType.POWER_ON: power_task,
     JobType.POWER_OFF: power_task,
+    JobType.POWER_FORCE_OFF: power_task,
     JobType.POWER_CYCLE: power_task,
     JobType.POWER_RESET: power_task,
+    JobType.BMC_SETUP: bmc_setup_task,
     JobType.INSTALL: install_task,
     JobType.RESCUE: rescue_task,
     JobType.WIPE: wipe_task,

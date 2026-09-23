@@ -1,50 +1,64 @@
 #!/usr/bin/env bash
-# Install DedicatedOZ on a fresh Ubuntu VM as the management server.
+# Install (or update) DedicatedOZ on an Ubuntu 22.04 / 24.04 VM, as a service.
 #
-# Turns a bare Ubuntu 22.04 or 24.04 machine into the control plane:
+# Everything runs under one systemd service, `doz`:
 #
-#   PostgreSQL + Redis          state and queue
-#   doz-api / worker / beat     systemd services running as the `doz` user
-#   nginx                       portal on :80, boot assets on :8080
-#   dnsmasq                     PXE (TFTP + DHCP or proxy-DHCP), no DNS
-#   iPXE                        undionly.kpxe / ipxe.efi in the TFTP root
+#   sudo systemctl status doz      # the umbrella
+#   sudo systemctl restart doz     # restarts every part
+#   ./doz.sh status                # each part, plus worker health
 #
-# Run from a checkout of the repository, as root:
+# Parts (all PartOf=doz.service, all started at boot):
+#   doz-api                API behind nginx
+#   doz-worker-power       power actions, Prepare BMC       (never waits on installs)
+#   doz-worker-provision   reinstall / rescue / wipe        (long-running)
+#   doz-worker-poll        inventory, health, sweeps
+#   doz-beat               the scheduler
+#   doz-pxe                DHCP/TFTP for netboot (dnsmasq)  (unless --no-pxe)
+# plus PostgreSQL, Redis and nginx from Ubuntu.
 #
-#   sudo ./deploy/install-management-server.sh --ip 10.0.0.5 --dhcp-range 10.0.0.150,10.0.0.199
+# First install -- pick how PXE should get addresses on the flat network:
+#
+#   sudo ./deploy/install-management-server.sh --ip 10.0.0.5 --dhcp-range 10.0.0.200,10.0.0.249
 #   sudo ./deploy/install-management-server.sh --ip 10.0.0.5 --proxy-dhcp
+#   sudo ./deploy/install-management-server.sh --ip 10.0.0.5 --no-pxe
 #
-# --dhcp-range makes this VM the DHCP server for the flat network (use it when
-# nothing else is handing out addresses). --proxy-dhcp leaves your existing
-# DHCP alone and only adds the PXE options alongside it. Pick one.
+#   --dhcp-range   this VM becomes the DHCP server (nothing else hands out addresses)
+#   --proxy-dhcp   your router keeps doing DHCP; this only adds the PXE options
+#   --no-pxe       no DHCP/TFTP at all: panel, power and console only (add PXE later)
 #
-# Re-runnable: it skips what is already done and never overwrites an existing
-# /etc/doz/doz.env, so secrets survive a re-run.
+# Update: pull the new code and run it again with no arguments. The settings
+# from the first run are kept in /etc/doz/install.conf; secrets in
+# /etc/doz/doz.env are never overwritten.
 
 set -euo pipefail
 
-# ---------------------------------------------------------------------------
-# Arguments
-# ---------------------------------------------------------------------------
+SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+INSTALL_DIR="/opt/doz"
+CONF=/etc/doz/install.conf
 
 MGMT_IP=""
 IFACE=""
+PXE_MODE=""          # authoritative | proxy | none
 DHCP_RANGE=""
-PROXY_DHCP=0
-ADMIN_EMAIL="admin@example.com"
+ADMIN_EMAIL=""
 FETCH_IMAGES=0
 WITH_DOCKER=0
-SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-INSTALL_DIR="/opt/doz"
 
-usage() { sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,33p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+
+# Saved settings first, so arguments override them.
+if [ -f "$CONF" ]; then
+    # shellcheck disable=SC1090
+    . "$CONF"
+fi
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --ip)           MGMT_IP="$2"; shift 2 ;;
         --iface)        IFACE="$2"; shift 2 ;;
-        --dhcp-range)   DHCP_RANGE="$2"; shift 2 ;;
-        --proxy-dhcp)   PROXY_DHCP=1; shift ;;
+        --dhcp-range)   PXE_MODE=authoritative; DHCP_RANGE="$2"; shift 2 ;;
+        --proxy-dhcp)   PXE_MODE=proxy; DHCP_RANGE=""; shift ;;
+        --no-pxe)       PXE_MODE=none; DHCP_RANGE=""; shift ;;
         --admin-email)  ADMIN_EMAIL="$2"; shift 2 ;;
         --fetch-images) FETCH_IMAGES=1; shift ;;
         --with-docker)  WITH_DOCKER=1; shift ;;
@@ -53,15 +67,19 @@ while [ $# -gt 0 ]; do
         *) echo "unknown argument: $1" >&2; usage 2 ;;
     esac
 done
+ADMIN_EMAIL="${ADMIN_EMAIL:-admin@example.com}"
 
 say()  { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 note() { printf '    %s\n' "$*"; }
 die()  { printf '\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }
+# runuser, not sudo: minimal and cloud images do not always ship sudo, and
+# the installer already runs as root.
+as_doz()      { runuser -u doz -- "$@"; }
+as_postgres() { runuser -u postgres -- "$@"; }
 
 [ "$(id -u)" -eq 0 ] || die "run as root (sudo)"
 [ -f "$SRC_DIR/backend/pyproject.toml" ] || die "cannot find the repository at $SRC_DIR (use --src)"
-[ -n "$DHCP_RANGE" ] || [ "$PROXY_DHCP" -eq 1 ] || die "choose --dhcp-range START,END or --proxy-dhcp"
-[ -z "$DHCP_RANGE" ] || [ "$PROXY_DHCP" -eq 0 ] || die "--dhcp-range and --proxy-dhcp are mutually exclusive"
+[ -n "$PXE_MODE" ] || die "first install: choose --dhcp-range START,END, --proxy-dhcp or --no-pxe"
 
 . /etc/os-release
 case "${VERSION_ID:-}" in
@@ -69,66 +87,88 @@ case "${VERSION_ID:-}" in
     *) die "this installer targets Ubuntu 22.04 or 24.04 (found ${PRETTY_NAME:-unknown})" ;;
 esac
 
+export DEBIAN_FRONTEND=noninteractive
+
 # ---------------------------------------------------------------------------
-# Network facts
+# Prerequisites for working out the network
 # ---------------------------------------------------------------------------
+
+say "preparing"
+apt-get update -qq
+apt-get install -y -qq --no-install-recommends iproute2 python3 ca-certificates curl gnupg >/dev/null
 
 if [ -z "$IFACE" ]; then
     IFACE="$(ip -o route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n1)"
-    [ -n "$IFACE" ] || IFACE="$(ip -o link show | awk -F': ' '$2!="lo"{print $2; exit}')"
+    [ -n "$IFACE" ] || IFACE="$(ip -o link show | awk -F': ' '$2!="lo"{print $2; exit}' | cut -d@ -f1)"
 fi
 if [ -z "$MGMT_IP" ]; then
     MGMT_IP="$(ip -o -4 addr show dev "$IFACE" | awk '{print $4}' | cut -d/ -f1 | head -n1)"
 fi
 [ -n "$MGMT_IP" ] || die "could not determine this machine's IP; pass --ip"
 CIDR="$(ip -o -4 addr show dev "$IFACE" | awk '{print $4}' | head -n1)"
-SUBNET="$(python3 -c "import ipaddress,sys; n=ipaddress.ip_network(sys.argv[1], strict=False); print(n.network_address, n.netmask)" "$CIDR")"
-NET_ADDR="${SUBNET% *}"; NET_MASK="${SUBNET#* }"
-GATEWAY="$(ip -o -4 route show default dev "$IFACE" 2>/dev/null | awk '{print $3}' | head -n1)"
+[ -n "$CIDR" ] || die "interface $IFACE has no IPv4 address; pass --iface"
+read -r NET_ADDR NET_MASK < <(python3 -c "import ipaddress,sys; n=ipaddress.ip_network(sys.argv[1], strict=False); print(n.network_address, n.netmask)" "$CIDR")
+GATEWAY="$(ip -o -4 route show default 2>/dev/null | awk '{print $3}' | head -n1)"
 
 say "DedicatedOZ management server"
 note "OS:          $PRETTY_NAME"
 note "interface:   $IFACE  ($CIDR)"
 note "this host:   $MGMT_IP"
 note "gateway:     ${GATEWAY:-none}"
-if [ -n "$DHCP_RANGE" ]; then note "DHCP:        authoritative, range $DHCP_RANGE"; else note "DHCP:        proxy (existing DHCP server stays in charge)"; fi
+case "$PXE_MODE" in
+    authoritative) note "PXE:         this VM is the DHCP server, range $DHCP_RANGE" ;;
+    proxy)         note "PXE:         proxy DHCP beside your existing DHCP server" ;;
+    none)          note "PXE:         off (panel, power and console only)" ;;
+esac
 note "install to:  $INSTALL_DIR"
+
+mkdir -p /etc/doz
+cat > "$CONF" <<EOF
+# Settings from the last run of install-management-server.sh. Re-running the
+# installer with no arguments reuses these; arguments override them.
+MGMT_IP=$MGMT_IP
+IFACE=$IFACE
+PXE_MODE=$PXE_MODE
+DHCP_RANGE=$DHCP_RANGE
+ADMIN_EMAIL=$ADMIN_EMAIL
+EOF
 
 # ---------------------------------------------------------------------------
 # Packages
 # ---------------------------------------------------------------------------
 
 say "installing packages"
-export DEBIAN_FRONTEND=noninteractive
-apt-get update -qq
+# dnsmasq-base, not dnsmasq: the full package brings its own service, which
+# listens for DNS on port 53 (clashing with systemd-resolved) and registers
+# itself as the host's resolver. We run dnsmasq under our own unit instead.
 apt-get install -y -qq --no-install-recommends \
-    ca-certificates curl gnupg git rsync \
-    postgresql redis-server nginx dnsmasq \
-    ipmitool libarchive-tools \
-    ufw >/dev/null
+    git rsync postgresql redis-server nginx dnsmasq-base \
+    ipmitool libarchive-tools >/dev/null
 
 # Python: the code needs 3.11+. 24.04 ships 3.12; 22.04 ships 3.10.
 if [ "$VERSION_ID" = "22.04" ]; then
     if ! command -v python3.11 >/dev/null; then
         note "Ubuntu 22.04: adding deadsnakes for python3.11"
-        apt-get install -y -qq software-properties-common >/dev/null
+        apt-get install -y -qq --no-install-recommends software-properties-common >/dev/null
         add-apt-repository -y ppa:deadsnakes/ppa >/dev/null
         apt-get update -qq
     fi
-    apt-get install -y -qq python3.11 python3.11-venv python3.11-dev >/dev/null
+    apt-get install -y -qq --no-install-recommends python3.11 python3.11-venv python3.11-dev >/dev/null
     PYTHON=python3.11
 else
-    apt-get install -y -qq python3 python3-venv python3-dev >/dev/null
+    apt-get install -y -qq --no-install-recommends python3-venv python3-dev >/dev/null
     PYTHON=python3
 fi
 note "python: $($PYTHON --version)"
 
-# Node 22 for the frontend build only. Nothing runs on it at runtime.
+# Node 22 builds the frontend. Nothing runs on it afterwards.
 if ! command -v node >/dev/null || [ "$(node -v | cut -d. -f1 | tr -d v)" -lt 20 ]; then
     note "installing Node.js 22 (build-time only)"
     mkdir -p /etc/apt/keyrings
-    curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg
-    echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" > /etc/apt/sources.list.d/nodesource.list
+    curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+        | gpg --dearmor --yes -o /etc/apt/keyrings/nodesource.gpg
+    echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" \
+        > /etc/apt/sources.list.d/nodesource.list
     apt-get update -qq && apt-get install -y -qq nodejs >/dev/null
 fi
 note "node: $(node -v)"
@@ -140,20 +180,36 @@ if [ "$WITH_DOCKER" -eq 1 ] && ! command -v docker >/dev/null; then
 fi
 
 # ---------------------------------------------------------------------------
+# Upgrading from an earlier layout
+# ---------------------------------------------------------------------------
+
+if [ -f /etc/systemd/system/doz-worker.service ]; then
+    note "replacing the single doz-worker service with per-queue workers"
+    systemctl disable --now doz-worker.service >/dev/null 2>&1 || true
+    rm -f /etc/systemd/system/doz-worker.service
+fi
+if [ -f /etc/dnsmasq.d/doz.conf ]; then
+    note "moving PXE from the distro dnsmasq service to doz-pxe"
+    rm -f /etc/dnsmasq.d/doz.conf
+    systemctl disable --now dnsmasq.service >/dev/null 2>&1 || true
+fi
+
+# ---------------------------------------------------------------------------
 # User and files
 # ---------------------------------------------------------------------------
 
 say "installing to $INSTALL_DIR"
 id doz >/dev/null 2>&1 || useradd --system --home-dir "$INSTALL_DIR" --shell /usr/sbin/nologin doz
-mkdir -p "$INSTALL_DIR" /etc/doz /etc/doz/cimc "$INSTALL_DIR/installer/assets" "$INSTALL_DIR/installer/tftp"
+mkdir -p "$INSTALL_DIR" /etc/doz/cimc /var/lib/doz "$INSTALL_DIR/installer/assets" "$INSTALL_DIR/installer/tftp"
 
 if [ "$(readlink -f "$SRC_DIR")" != "$(readlink -f "$INSTALL_DIR")" ]; then
     rsync -a --delete \
-        --exclude '.venv' --exclude 'node_modules' --exclude '.run' \
-        --exclude 'frontend/dist' --exclude 'installer/assets' --exclude '.env' \
+        --exclude '.venv' --exclude 'node_modules' --exclude '.run' --exclude '.git' \
+        --exclude 'frontend/dist' --exclude 'installer/assets' --exclude 'installer/tftp' \
+        --exclude '.env' \
         "$SRC_DIR/" "$INSTALL_DIR/"
 fi
-chown -R doz:doz "$INSTALL_DIR"
+chown -R doz:doz "$INSTALL_DIR" /var/lib/doz
 chown root:doz /etc/doz; chmod 750 /etc/doz
 chown doz:doz /etc/doz/cimc; chmod 700 /etc/doz/cimc
 
@@ -163,19 +219,20 @@ chown doz:doz /etc/doz/cimc; chmod 700 /etc/doz/cimc
 
 say "database"
 systemctl enable --now postgresql redis-server >/dev/null
+for _ in $(seq 1 30); do as_postgres psql -qtAc "SELECT 1" >/dev/null 2>&1 && break; sleep 1; done
 if [ -f /etc/doz/doz.env ] && grep -q '^DOZ_DATABASE_URL=' /etc/doz/doz.env; then
     DB_PASS="$(sed -n 's|^DOZ_DATABASE_URL=postgresql+psycopg://doz:\([^@]*\)@.*|\1|p' /etc/doz/doz.env)"
     note "keeping existing database credentials"
 else
     DB_PASS="$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')"
 fi
-if ! sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='doz'" | grep -q 1; then
-    sudo -u postgres psql -qc "CREATE USER doz WITH PASSWORD '$DB_PASS';"
+if ! as_postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='doz'" | grep -q 1; then
+    as_postgres psql -qc "CREATE USER doz WITH PASSWORD '$DB_PASS';"
 else
-    sudo -u postgres psql -qc "ALTER USER doz WITH PASSWORD '$DB_PASS';"
+    as_postgres psql -qc "ALTER USER doz WITH PASSWORD '$DB_PASS';"
 fi
-sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='doz'" | grep -q 1 \
-    || sudo -u postgres createdb -O doz doz
+as_postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='doz'" | grep -q 1 \
+    || as_postgres createdb -O doz doz
 note "postgres role and database ready"
 
 # ---------------------------------------------------------------------------
@@ -183,11 +240,12 @@ note "postgres role and database ready"
 # ---------------------------------------------------------------------------
 
 say "configuration"
-if [ "$PROXY_DHCP" -eq 1 ]; then PIN=false; else PIN=true; fi
+if [ "$PXE_MODE" = "authoritative" ]; then PIN=true; else PIN=false; fi
 if [ ! -f /etc/doz/doz.env ]; then
     JWT_SECRET="$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')"
     cat > /etc/doz/doz.env <<ENV
-# DedicatedOZ production configuration. Read by the systemd units.
+# DedicatedOZ production configuration. Read by every doz-* service.
+# Change something, then: sudo systemctl restart doz
 DOZ_ENVIRONMENT=production
 DOZ_LOG_LEVEL=INFO
 
@@ -205,6 +263,10 @@ DOZ_BOOT_ASSET_BASE_URL=http://${MGMT_IP}:8080
 DOZ_SECRETS_BACKEND=file
 DOZ_SECRETS_FILE_DIR=/etc/doz/cimc
 
+# How power and boot are driven: auto (IPMI, then Redfish), ipmi, redfish.
+DOZ_BMC_PROTOCOL=auto
+# ipmitool: pin cipher suite 3, or every call can cost ten seconds.
+DOZ_IPMI_CIPHER_SUITE=3
 DOZ_REDFISH_VERIFY_TLS=false
 DOZ_REDFISH_TIMEOUT_SECONDS=30
 DOZ_REDFISH_MAX_RETRIES=3
@@ -212,8 +274,8 @@ DOZ_REDFISH_MAX_RETRIES=3
 DOZ_INSTALL_TIMEOUT_SECONDS=2700
 DOZ_CALLBACK_TOKEN_TTL_SECONDS=14400
 DOZ_REQUIRE_WIPE_BEFORE_STOCK=true
-# ${PIN}: authoritative dnsmasq keys leases on MAC (safe to pin); proxy mode
-# cannot guarantee the installer gets the same address as iPXE did.
+# ${PIN}: authoritative dnsmasq keys leases on MAC (safe to pin); with proxy
+# DHCP the installer may not get the address iPXE did.
 DOZ_BOOT_PIN_CLIENT_IP=${PIN}
 
 # nginx is in front of the API and sets X-Forwarded-For.
@@ -222,6 +284,9 @@ DOZ_CORS_ORIGINS=http://${MGMT_IP}
 
 DOZ_INSTALLER_TEMPLATE_DIR=${INSTALL_DIR}/installer/templates
 DOZ_IPMITOOL_PATH=/usr/bin/ipmitool
+DOZ_SOL_IDLE_TIMEOUT_SECONDS=1800
+# vKVM: empty probes the CIMC for its HTML5 viewer. Placeholders {host} {tkn1} {tkn2}.
+# DOZ_KVM_URL_TEMPLATE='https://{host}/html/kvmViewer.html?tkn1={tkn1}&tkn2={tkn2}'
 ENV
     note "wrote /etc/doz/doz.env"
 else
@@ -234,7 +299,7 @@ chown root:doz /etc/doz/doz.env; chmod 640 /etc/doz/doz.env
 # ---------------------------------------------------------------------------
 
 say "backend"
-sudo -u doz bash -c "
+as_doz bash -c "
     set -e
     cd '$INSTALL_DIR/backend'
     [ -x .venv/bin/python ] || $PYTHON -m venv .venv
@@ -243,7 +308,7 @@ sudo -u doz bash -c "
 "
 note "python dependencies installed"
 
-INIT_OUT="$(sudo -u doz bash -c "set -a; . /etc/doz/doz.env; set +a; cd '$INSTALL_DIR/backend' && .venv/bin/python -m scripts.init_db --admin-email '$ADMIN_EMAIL'")"
+INIT_OUT="$(as_doz bash -c "set -a; . /etc/doz/doz.env; set +a; cd '$INSTALL_DIR/backend' && .venv/bin/python -m scripts.init_db --admin-email '$ADMIN_EMAIL'")"
 echo "$INIT_OUT" | sed 's/^/    /'
 ADMIN_PASSWORD="$(echo "$INIT_OUT" | sed -n 's/^admin password: *//p')"
 
@@ -252,7 +317,7 @@ ADMIN_PASSWORD="$(echo "$INIT_OUT" | sed -n 's/^admin password: *//p')"
 # ---------------------------------------------------------------------------
 
 say "frontend"
-sudo -u doz bash -c "cd '$INSTALL_DIR/frontend' && npm ci --silent && npm run build --silent" >/dev/null
+as_doz bash -c "cd '$INSTALL_DIR/frontend' && npm ci --silent --no-audit --no-fund && npm run build --silent" >/dev/null
 note "built to $INSTALL_DIR/frontend/dist"
 
 # ---------------------------------------------------------------------------
@@ -260,11 +325,17 @@ note "built to $INSTALL_DIR/frontend/dist"
 # ---------------------------------------------------------------------------
 
 say "services"
-unit() {
-    # unit <name> <description> <exec>
-    cat > "/etc/systemd/system/$1.service" <<UNIT
+VENV="$INSTALL_DIR/backend/.venv/bin"
+CELERY="$VENV/celery -A app.workers.celery_app.celery_app"
+
+part() {
+    # part <name> <description> <exec> [extra [Service] lines...]
+    local name="$1" description="$2" exec="$3"; shift 3
+    {
+        cat <<UNIT
 [Unit]
-Description=DedicatedOZ $2
+Description=DedicatedOZ $description
+PartOf=doz.service
 After=network-online.target postgresql.service redis-server.service
 Wants=network-online.target
 
@@ -274,25 +345,93 @@ User=doz
 Group=doz
 WorkingDirectory=$INSTALL_DIR/backend
 EnvironmentFile=/etc/doz/doz.env
-ExecStart=$3
+ExecStart=$exec
 Restart=always
 RestartSec=3
-# The worker holds BMC credentials in memory; keep the process locked down.
+# Workers hold BMC credentials in memory; keep them locked down.
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
-ReadWritePaths=/etc/doz/cimc $INSTALL_DIR/installer/assets
+ReadWritePaths=/etc/doz/cimc /var/lib/doz $INSTALL_DIR/installer/assets
+UNIT
+        for line in "$@"; do echo "$line"; done
+        cat <<UNIT
+
+[Install]
+WantedBy=doz.service
+UNIT
+    } > "/etc/systemd/system/$name.service"
+}
+
+part doz-api "API" \
+    "$VENV/uvicorn app.main:app --host 127.0.0.1 --port 8000 --proxy-headers --forwarded-allow-ips 127.0.0.1"
+# One worker per queue, so a pile of twenty-minute reinstalls can never sit in
+# front of someone's power button.
+part doz-worker-power "power worker" \
+    "$CELERY worker -n power@%%h -Q power --concurrency=8 --loglevel=info" \
+    "KillMode=mixed" "TimeoutStopSec=60"
+part doz-worker-provision "provisioning worker" \
+    "$CELERY worker -n provision@%%h -Q provision --concurrency=8 --loglevel=info" \
+    "KillMode=mixed" "TimeoutStopSec=60"
+part doz-worker-poll "polling worker" \
+    "$CELERY worker -n poll@%%h -Q poll --concurrency=4 --loglevel=info" \
+    "KillMode=mixed" "TimeoutStopSec=60"
+part doz-beat "scheduler" \
+    "$CELERY beat --loglevel=info --schedule /var/lib/doz/celerybeat-schedule"
+
+PARTS="doz-api doz-worker-power doz-worker-provision doz-worker-poll doz-beat"
+
+if [ "$PXE_MODE" != "none" ]; then
+    cat > /etc/systemd/system/doz-pxe.service <<UNIT
+[Unit]
+Description=DedicatedOZ PXE (DHCP/TFTP via dnsmasq)
+PartOf=doz.service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStartPre=/usr/sbin/dnsmasq --test --conf-file=/etc/doz/dnsmasq.conf
+ExecStart=/usr/sbin/dnsmasq --keep-in-foreground --conf-file=/etc/doz/dnsmasq.conf --pid-file=/run/doz-pxe.pid
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=doz.service
+UNIT
+    PARTS="$PARTS doz-pxe"
+else
+    if [ -f /etc/systemd/system/doz-pxe.service ]; then
+        systemctl disable --now doz-pxe.service >/dev/null 2>&1 || true
+        rm -f /etc/systemd/system/doz-pxe.service
+    fi
+fi
+
+WANTS=""
+for p in $PARTS; do WANTS="$WANTS $p.service"; done
+cat > /etc/systemd/system/doz.service <<UNIT
+[Unit]
+Description=DedicatedOZ control plane
+Documentation=file://$INSTALL_DIR/docs/GETTING-STARTED.md
+Wants=$WANTS
+After=postgresql.service redis-server.service
+
+# The umbrella: start, stop and restart it and every part follows (each part
+# is PartOf=doz.service). The work happens in the parts; this unit only
+# groups them, the same pattern Ubuntu uses for openvpn.service.
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/true
+ExecReload=/bin/true
 
 [Install]
 WantedBy=multi-user.target
 UNIT
-}
-unit doz-api    "API"            "$INSTALL_DIR/backend/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --proxy-headers --forwarded-allow-ips 127.0.0.1"
-unit doz-worker "job worker"     "$INSTALL_DIR/backend/.venv/bin/celery -A app.workers.celery_app.celery_app worker --loglevel=info -Q provision,power,poll --concurrency=4"
-unit doz-beat   "scheduler"      "$INSTALL_DIR/backend/.venv/bin/celery -A app.workers.celery_app.celery_app beat --loglevel=info"
 systemctl daemon-reload
-systemctl enable --now doz-api doz-worker doz-beat >/dev/null
-note "doz-api, doz-worker, doz-beat enabled"
+# shellcheck disable=SC2086
+systemctl enable doz.service $WANTS >/dev/null 2>&1
+note "doz.service enabled at boot, with:$WANTS"
 
 # ---------------------------------------------------------------------------
 # nginx
@@ -312,7 +451,6 @@ server {
     server_name _;
     root $INSTALL_DIR/frontend/dist;
     index index.html;
-
     client_max_body_size 16m;
 
     # The React app; unknown paths fall through to it for client-side routing.
@@ -320,7 +458,8 @@ server {
         try_files \$uri /index.html;
     }
 
-    # API, netboot rail, docs. Websocket headers are for the SOL console.
+    # API, netboot rail, docs. The upgrade headers carry the serial console
+    # websocket; the long timeout keeps an idle console open.
     location ~ ^/(api|boot|health|docs|openapi\.json|redoc) {
         proxy_pass         http://127.0.0.1:8000;
         proxy_http_version 1.1;
@@ -352,30 +491,39 @@ NGINX
 ln -sf /etc/nginx/sites-available/doz /etc/nginx/sites-enabled/doz
 rm -f /etc/nginx/sites-enabled/default
 nginx -t >/dev/null 2>&1 || { nginx -t; die "nginx config failed validation"; }
-systemctl enable --now nginx >/dev/null
-systemctl reload nginx
+systemctl enable nginx >/dev/null 2>&1
+systemctl restart nginx
 note "portal on http://$MGMT_IP, boot assets on http://$MGMT_IP:8080"
 
 # ---------------------------------------------------------------------------
-# iPXE + dnsmasq
+# PXE config
 # ---------------------------------------------------------------------------
 
-say "PXE"
-TFTP="$INSTALL_DIR/installer/tftp"
-for f in undionly.kpxe ipxe.efi; do
-    if [ ! -s "$TFTP/$f" ]; then
-        note "fetching $f from boot.ipxe.org"
-        curl -fsSL --retry 3 -o "$TFTP/$f" "https://boot.ipxe.org/$f"
-    fi
-done
-chown -R doz:doz "$TFTP"
+if [ "$PXE_MODE" != "none" ]; then
+    say "PXE"
+    TFTP="$INSTALL_DIR/installer/tftp"
+    # BIOS and UEFI iPXE builds. boot.ipxe.org keeps the EFI one under
+    # x86_64-efi/ (the old top-level ipxe.efi URL now 404s).
+    for pair in "undionly.kpxe=undionly.kpxe" "ipxe.efi=x86_64-efi/ipxe.efi"; do
+        f="${pair%%=*}"; path="${pair#*=}"
+        if [ ! -s "$TFTP/$f" ]; then
+            note "fetching $f from boot.ipxe.org"
+            curl -fsSL --retry 3 -o "$TFTP/$f.part" "https://boot.ipxe.org/$path" \
+                && mv "$TFTP/$f.part" "$TFTP/$f" \
+                || { rm -f "$TFTP/$f.part"; note "could not fetch $f; place it in $TFTP by hand"; }
+        fi
+    done
+    chown -R doz:doz "$TFTP"
+    DNSMASQ_USER=nobody
+    id dnsmasq >/dev/null 2>&1 && DNSMASQ_USER=dnsmasq
 
-# systemd-resolved owns 127.0.0.53:53; we do not want DNS from dnsmasq at all.
-cat > /etc/dnsmasq.d/doz.conf <<DNSMASQ
-# DedicatedOZ PXE. Generated by deploy/install-management-server.sh.
+    cat > /etc/doz/dnsmasq.conf <<DNSMASQ
+# DedicatedOZ PXE, run by doz-pxe.service. Generated by the installer.
 port=0
 interface=$IFACE
-bind-interfaces
+bind-dynamic
+user=$DNSMASQ_USER
+log-facility=-
 log-dhcp
 
 enable-tftp
@@ -388,25 +536,24 @@ dhcp-match=set:efi64,option:client-arch,7
 dhcp-match=set:efi64,option:client-arch,9
 DNSMASQ
 
-if [ -n "$DHCP_RANGE" ]; then
-    cat >> /etc/dnsmasq.d/doz.conf <<DNSMASQ
+    if [ "$PXE_MODE" = "authoritative" ]; then
+        cat >> /etc/doz/dnsmasq.conf <<DNSMASQ
 
 # Authoritative DHCP for the flat network.
 dhcp-range=${DHCP_RANGE},${NET_MASK},12h
 dhcp-authoritative
 ${GATEWAY:+dhcp-option=option:router,$GATEWAY}
 dhcp-option=option:dns-server,1.1.1.1,8.8.8.8
-# Key leases on MAC only. iPXE, the ramdisk and the OS installer each send a
-# different client-id; without this the same machine can get three addresses
-# during one install, and the platform pins boot files to the first one.
+# Key leases on MAC only: iPXE, the installer ramdisk and the OS installer each
+# send a different client-id and must all land on the same address.
 dhcp-ignore-clid
 
 dhcp-boot=tag:!ipxe,tag:!efi64,undionly.kpxe,,${MGMT_IP}
 dhcp-boot=tag:!ipxe,tag:efi64,ipxe.efi,,${MGMT_IP}
 dhcp-boot=tag:ipxe,http://${MGMT_IP}/boot/ipxe
 DNSMASQ
-else
-    cat >> /etc/dnsmasq.d/doz.conf <<DNSMASQ
+    else
+        cat >> /etc/doz/dnsmasq.conf <<DNSMASQ
 
 # Proxy DHCP: the existing DHCP server keeps handing out addresses; this only
 # adds PXE boot information alongside its replies.
@@ -417,25 +564,19 @@ pxe-service=tag:!ipxe,X86-64_EFI,"Boot DedicatedOZ (UEFI)",ipxe.efi
 pxe-service=tag:ipxe,x86PC,"DedicatedOZ",http://${MGMT_IP}/boot/ipxe
 pxe-service=tag:ipxe,X86-64_EFI,"DedicatedOZ",http://${MGMT_IP}/boot/ipxe
 DNSMASQ
+    fi
+    /usr/sbin/dnsmasq --test --conf-file=/etc/doz/dnsmasq.conf >/dev/null 2>&1 \
+        || { /usr/sbin/dnsmasq --test --conf-file=/etc/doz/dnsmasq.conf; die "dnsmasq config failed validation"; }
+    note "doz-pxe will serve TFTP from $TFTP"
 fi
-
-dnsmasq --test -C /etc/dnsmasq.conf >/dev/null 2>&1 || { dnsmasq --test; die "dnsmasq config failed validation"; }
-systemctl enable --now dnsmasq >/dev/null
-systemctl restart dnsmasq
-note "dnsmasq serving TFTP from $TFTP"
 
 # ---------------------------------------------------------------------------
 # Firewall
 # ---------------------------------------------------------------------------
 
-if ufw status 2>/dev/null | grep -q "Status: active"; then
+if command -v ufw >/dev/null && ufw status 2>/dev/null | grep -q "Status: active"; then
     say "firewall"
-    ufw allow 22/tcp  >/dev/null
-    ufw allow 80/tcp  >/dev/null
-    ufw allow 8080/tcp >/dev/null
-    ufw allow 67/udp  >/dev/null
-    ufw allow 69/udp  >/dev/null
-    ufw allow 4011/udp >/dev/null
+    for rule in 22/tcp 80/tcp 8080/tcp 67/udp 69/udp 4011/udp; do ufw allow "$rule" >/dev/null; done
     note "opened 22, 80, 8080/tcp and 67, 69, 4011/udp"
 fi
 
@@ -445,7 +586,7 @@ fi
 
 if [ "$FETCH_IMAGES" -eq 1 ]; then
     say "OS installer images (this downloads ~2.5 GB)"
-    sudo -u doz "$INSTALL_DIR/deploy/fetch-os-images.sh" --assets "$INSTALL_DIR/installer/assets"
+    as_doz "$INSTALL_DIR/deploy/fetch-os-images.sh" --assets "$INSTALL_DIR/installer/assets"
 fi
 
 if [ "$WITH_DOCKER" -eq 1 ]; then
@@ -456,19 +597,45 @@ if [ "$WITH_DOCKER" -eq 1 ]; then
 fi
 
 # ---------------------------------------------------------------------------
+# Start, and prove it
+# ---------------------------------------------------------------------------
 
-say "checking"
-sleep 2
-if curl -fsS "http://127.0.0.1/health" | grep -q '"status":"ok"'; then
-    note "API healthy through nginx"
-else
-    note "API not answering yet: journalctl -u doz-api"
-fi
+say "starting"
+systemctl restart doz.service
+FAILED=""
+for p in $PARTS; do
+    ok=0
+    for _ in $(seq 1 30); do
+        if systemctl is-active --quiet "$p"; then ok=1; break; fi
+        sleep 1
+    done
+    if [ "$ok" -eq 1 ]; then note "$p: running"; else note "$p: NOT running"; FAILED="$FAILED $p"; fi
+done
+
+HEALTH=""
+for _ in $(seq 1 30); do
+    if HEALTH="$(curl -fsS http://127.0.0.1/health 2>/dev/null)"; then break; fi
+    sleep 1
+done
+case "$HEALTH" in
+    *'"status":"ok"'*) note "API healthy through nginx" ;;
+    *) note "API not answering through nginx yet"; FAILED="$FAILED api-health" ;;
+esac
+
+# Workers take a few seconds after their unit starts to reach the broker.
+WORKERS=0
+for _ in $(seq 1 12); do
+    WORKERS="$(as_doz bash -c "set -a; . /etc/doz/doz.env; set +a; cd '$INSTALL_DIR/backend' && $CELERY inspect ping --timeout 3" 2>/dev/null | grep -c 'pong' || true)"
+    [ "$WORKERS" -ge 3 ] && break
+    sleep 3
+done
+note "celery workers answering: $WORKERS of 3"
+[ "$WORKERS" -ge 3 ] || FAILED="$FAILED workers"
 
 cat <<SUMMARY
 
 =======================================================================
- DedicatedOZ is installed.
+ DedicatedOZ is installed and running as the 'doz' service.
 =======================================================================
 
  Portal:        http://${MGMT_IP}
@@ -478,20 +645,31 @@ cat <<SUMMARY
 SUMMARY
 if [ -n "$ADMIN_PASSWORD" ]; then
     echo " Password:      ${ADMIN_PASSWORD}"
-    echo "                (shown once; reset with: ./doz.sh reset-admin ${ADMIN_EMAIL})"
+    echo "                (shown once; reset with: $INSTALL_DIR/doz.sh reset-admin ${ADMIN_EMAIL})"
 else
     echo " Password:      unchanged (account already existed)"
 fi
 cat <<SUMMARY
 
- Config:        /etc/doz/doz.env
+ Service:       sudo systemctl status|restart|stop doz
+ Details:       $INSTALL_DIR/doz.sh status
+ Logs:          $INSTALL_DIR/doz.sh logs          (journalctl -u 'doz*')
+ Config:        /etc/doz/doz.env    (then: sudo systemctl restart doz)
  CIMC secrets:  /etc/doz/cimc/
- Logs:          journalctl -f -u doz-api -u doz-worker -u doz-beat
- Manage:        cd ${INSTALL_DIR} && ./doz.sh status|restart|logs
+ Update:        git pull && sudo ./doz.sh update
 
- Still to do before the first install:
-   1. ./deploy/fetch-os-images.sh        (or re-run with --fetch-images)
-   2. ./doz.sh ramdisk                    (needs docker; or --with-docker)
-   3. Point the servers' CIMCs and NICs at this network, then follow
-      docs/GETTING-STARTED.md
+ No hardware yet? Try power and the serial console against a simulated BMC:
+                sudo apt install openipmi && sudo $INSTALL_DIR/doz.sh sim start
+
+ Before the first reinstall:
+   1. sudo -u doz $INSTALL_DIR/deploy/fetch-os-images.sh   (or --fetch-images)
+   2. sudo $INSTALL_DIR/doz.sh ramdisk                     (needs docker)
+   3. docs/GETTING-STARTED.md for CIMC setup and the first server
 SUMMARY
+
+if [ -n "$FAILED" ]; then
+    echo
+    echo " WARNING: not everything came up:$FAILED"
+    echo "          journalctl -u 'doz*' --since '-5min' shows why."
+    exit 1
+fi

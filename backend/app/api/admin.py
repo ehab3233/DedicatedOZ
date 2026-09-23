@@ -152,6 +152,13 @@ def update_server(
         raise HTTPException(status_code=404, detail="server not found")
 
     changes = payload.model_dump(exclude_unset=True)
+    if changes.get("cimc_ip"):
+        try:
+            ipaddress.ip_address(changes["cimc_ip"])
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="cimc_ip is not an IP address") from exc
+    elif "cimc_ip" in changes:
+        changes.pop("cimc_ip")
     if "provisioning_mac" in changes and changes["provisioning_mac"]:
         try:
             changes["provisioning_mac"] = normalise_mac(changes["provisioning_mac"])
@@ -778,6 +785,9 @@ def _admin_server(db: Session, server: Server) -> AdminServerOut:
             **ServerDetailOut.model_validate(server).model_dump(),
             "cimc_ip": str(server.cimc_ip),
             "cimc_credential_ref": server.cimc_credential_ref,
+            "bmc_protocol": server.bmc_protocol,
+            "ipmi_port": server.ipmi_port,
+            "redfish_port": server.redfish_port,
             "cimc_firmware": server.cimc_firmware,
             "bios_version": server.bios_version,
             "rack": server.rack,

@@ -3,8 +3,10 @@
 Control plane for a bare-metal hosting business running on Cisco UCS C220 M4s.
 
 This is the portal and the provisioning rail: inventory, an async job engine,
-power control over Redfish, a netboot installer, rescue mode, secure wipe, a
-serial console, and the customer and admin UIs over all of it.
+power control over IPMI and Redfish, a netboot installer, rescue mode, secure
+wipe, a browser serial console, vKVM launch, and the customer and admin UIs
+over all of it. On the management server it runs as one Ubuntu service,
+`doz`.
 
 It deliberately does **not** include billing. Integrate WHMCS, HostBill or
 Blesta against the API instead — billing is a tar pit of tax rules and payment
@@ -16,13 +18,16 @@ gateways, and none of it is a differentiator.
 
 | | |
 |---|---|
+| Service | `sudo ./doz.sh install` makes it a systemd service: `systemctl start\|stop\|restart doz`, starts at boot |
 | Inventory | Register servers, sync hardware over Redfish, track rack/switch/VLAN position |
 | Jobs | Every action is queued, with an explicit state machine and a full log of raw BMC traffic |
-| Power | On, graceful off, cycle, hard reset — with read-back confirmation |
+| Power | Live state, on, graceful shut down, force off, reset, power cycle — over IPMI with Redfish as fallback, each confirmed by reading the state back |
 | Reinstall | iPXE → ramdisk → StorCLI RAID → kickstart/autoinstall/preseed → phone home |
 | Rescue | Same rail, boots to RAM, disks untouched |
 | Wipe | ATA secure erase / `nvme format` / `sg_format`, gated so an unwiped server cannot return to stock |
-| Console | Serial-over-LAN bridged to a browser websocket |
+| Console | Serial-over-LAN in the browser (xterm.js over a websocket), with take-over when someone else holds the port |
+| vKVM | One click asks the CIMC for launch tokens and opens its HTML5 viewer, or the Java launcher on older firmware |
+| BMC setup | **Prepare BMC** turns on IPMI over LAN, SOL and BIOS console redirection through the CIMC XML API |
 | IPAM | Blocks, assignments, free-pool view, customer-editable rDNS |
 | Health | PSU, fan, temperature and drive pre-fail, polled every 15 minutes |
 | Portal | Servers, power, reinstall, rescue, jobs, bandwidth, SSH keys, console |
@@ -45,8 +50,12 @@ Three network planes, and the separation is the security model:
 
 The M4 is past Cisco's last day of support. There will never be another CIMC
 firmware release, so the BMCs will never be patched again. Isolation is not a
-best practice here; it is the entire defence. The API process has no route to
-the OOB VLAN and no BMC credentials — only workers do.
+best practice here; it is the entire defence. Customers never reach a BMC:
+the management server talks to the CIMCs on their behalf. Jobs run in the
+workers. The API process also reads CIMC credentials, because the serial
+console, the live power state and the vKVM launch tokens are answered while
+someone waits. Splitting the API onto a host without an OOB route would mean
+moving those three behind a worker first.
 
 ### Everything is a job
 
@@ -69,40 +78,54 @@ The database is the source of truth, not Celery. A lost broker message leaves a
 job visibly `queued`; a dead worker leaves one `running` past its deadline,
 which the reaper fails. Neither disappears quietly.
 
-### Redfish, not Cisco
+### IPMI first, Redfish behind it, not Cisco
 
-`app/drivers/` speaks generic DMTF Redfish. Cisco-specific behaviour is
-confined to clearly marked fallbacks. Swapping in M5s or Dell R640s later means
-adding a driver, not a rewrite — and you should assume that happens, because
-the M4s are a cheap way to learn operations, not a permanent fleet.
+`app/drivers/` has two vendor-neutral drivers behind one interface:
 
-The driver assumes nothing works. It reads back every boot override it sets,
-falls back when the BMC refuses a graceful reset type, tries both the action
-and the PATCH form of virtual media insert, and redacts credentials before
-anything reaches the job log.
+- **IPMI** (`ipmitool lanplus`) drives power and the one-time PXE override.
+  A call takes tens of milliseconds, against seconds for the M4's Redfish,
+  and it is what the serial console needs anyway. The password goes through
+  the environment, never the command line, and cipher suite 3 is pinned
+  because ipmitool's suite probe costs ten seconds per call on BMCs that
+  ignore it.
+- **Redfish** handles inventory, health and virtual media, and takes over
+  power and boot when IPMI fails.
+
+`DOZ_BMC_PROTOCOL=auto` (the default) does exactly that. Each server can be
+pinned to `ipmi` or `redfish` in the panel. Cisco-specific code is confined
+to `drivers/cimc.py`, the XML API used for BMC setup and vKVM tokens.
+Swapping in M5s or Dell R640s later means adding a driver, not a rewrite.
+
+Both drivers assume nothing works. They read back every boot override they
+set, confirm every power change by reading the state back, fall back when the
+BMC refuses a graceful reset type, try both forms of virtual media insert,
+and redact credentials before anything reaches the job log.
 
 ---
 
 ## Repository layout
 
 ```
-doz.sh               run script: up / down / logs / test / bench / ...
+doz.sh               run script: install / update / up / down / status / logs / sim / ...
 backend/
   app/
-    drivers/         Redfish driver + the vendor-neutral interface
+    drivers/         IPMI + Redfish drivers, the fallback between them, CIMC XML API
     services/        state machines, job engine, boot rendering, IPAM, bandwidth
     api/             HTTP surface: customer, admin, and the netboot rail
     workers/         Celery tasks
   scripts/
     bench_validate.py   the five pre-build hardware tests
-    init_db.py          schema + seed
+    init_db.py          schema create/upgrade + seed
+    smoke_test.py       end-to-end check of an install: power + serial console
   tests/
 installer/
   templates/         iPXE scripts, provision.sh, OS answer files (Jinja2)
   build-ramdisk.sh   builds the installer image
 frontend/            React portal + management panel
 deploy/
-  install-management-server.sh   Ubuntu VM -> control plane, from scratch
+  install-management-server.sh   Ubuntu VM -> the `doz` service, from scratch
+  smoke-test.sh                  check an install against the BMC simulator
+  sim/                           simulated BMC (OpenIPMI ipmi_sim) for no-hardware testing
   fetch-os-images.sh             Ubuntu / Debian / Rocky netboot assets
 docs/
   GETTING-STARTED.md   flat-network onboarding, CIMC setup, first reinstall
@@ -120,11 +143,13 @@ bench, before racking anything:
 cd backend
 python -m scripts.bench_validate --host 10.0.0.10 --user admin \
     --iso-url http://10.10.0.5:8080/iso/ubuntu-22.04.iso \
-    --power-cycle
+    --power-cycle --prepare
 ```
 
-It checks firmware and Redfish reachability, one-time PXE override, vMedia ISO
-boot, SOL and vKVM, and walks you through driving StorCLI non-interactively.
+`--prepare` first turns on IPMI over LAN and SOL through the CIMC XML API.
+The script then checks firmware and Redfish reachability, the one-time PXE
+override over both IPMI and Redfish, vMedia ISO boot, a live SOL session and
+vKVM launch, and walks you through driving StorCLI non-interactively.
 Whichever of PXE and vMedia proves more reliable becomes your primary install
 path. Test 5 is the awkward one — budget time for it.
 
@@ -139,11 +164,33 @@ failure ambiguous.
 ### On the management server (production)
 
 A fresh Ubuntu 22.04 / 24.04 VM becomes the whole control plane — API,
-workers, nginx, PXE — in one command:
+workers, nginx, PXE — in one command, installed as the `doz` service:
 
 ```sh
 git clone https://github.com/ehab3233/DedicatedOZ.git && cd DedicatedOZ
-sudo ./deploy/install-management-server.sh --ip 10.0.0.5 --dhcp-range 10.0.0.200,10.0.0.249
+sudo ./doz.sh install --ip 10.0.0.5 --dhcp-range 10.0.0.200,10.0.0.249
+```
+
+`doz` is one systemd unit over all the parts, so the usual commands work on
+the whole stack and it starts at boot:
+
+```sh
+sudo systemctl status doz        # or: ./doz.sh status, which also shows each job queue's worker
+sudo systemctl restart doz
+journalctl -u 'doz*' -f          # or: ./doz.sh logs [api|power|provision|poll|beat|pxe]
+sudo ./doz.sh update             # after git pull: redeploy, keep config and secrets
+```
+
+The parts are `doz-api`, one Celery worker per queue (`doz-worker-power`,
+`doz-worker-provision`, `doz-worker-poll`), `doz-beat` and `doz-pxe`, so a
+twenty-minute reinstall never holds up someone's power button.
+
+To try power control and the serial console before any hardware arrives:
+
+```sh
+sudo apt install --no-install-recommends openipmi
+sudo ./doz.sh sim start          # a simulated BMC, registered as server SIM-0001
+sudo ./deploy/smoke-test.sh      # drives power and the console through nginx; resets the admin password
 ```
 
 Then **[docs/GETTING-STARTED.md](docs/GETTING-STARTED.md)** walks through
@@ -175,7 +222,7 @@ Log in as an admin and open **Manage**:
 | Page | What you do there |
 |---|---|
 | Fleet | Every server with rack position, CIMC, firmware drift, PXE MAC, state, health, customer. **Add server** registers one and syncs its hardware. |
-| Server | Power, reinstall, rescue, secure wipe, lifecycle state, suspend, inventory sync, health check, address assignment, assign to a customer, serial console, and every job with its raw BMC log. |
+| Server | Live power state with on, shut down, force off, reset and power cycle; serial console; vKVM and CIMC web UI links; Prepare BMC; reinstall, rescue, secure wipe, lifecycle state, inventory sync, health check, address assignment, customer assignment, BMC protocol and ports, and every job with its raw BMC log. |
 | Customers | Create accounts, generate initial passwords, disable logins, see and end subscriptions. |
 | IP space | Add blocks with gateways and provenance, see utilisation, find free addresses. |
 | Jobs | Everything that has run, filterable by state, with raw Redfish exchanges. |
@@ -191,8 +238,14 @@ They run against a real PostgreSQL (JSONB, INET, partial unique indexes), so
 they test what actually ships. The Redfish driver is tested against a simulated
 CIMC including its known misbehaviours — session limits, a boot override that
 reports success without taking effect, reset types the BMC will not accept, and
-virtual media missing its InsertMedia action. Every rendered provisioning
-script is syntax-checked with a POSIX shell.
+virtual media missing its InsertMedia action. The IPMI driver, the power jobs
+and the browser console are tested against a real IPMI stack (OpenIPMI's
+`ipmi_sim`, skipped if it is not installed), including SOL take-over. Every
+rendered provisioning script is syntax-checked with a POSIX shell.
+
+CI also installs the whole thing as a service on a clean Ubuntu 24.04 runner,
+runs the smoke test, runs `doz.sh update` and the smoke test again, and
+restarts the service.
 
 **[docs/REVIEW.md](docs/REVIEW.md)** is an honest pass over what would have
 broken on real hardware (fixed), what would have bitten on a flat network
@@ -208,8 +261,13 @@ All of it is environment-driven; see `.env.example`. The ones that matter:
   invalidates in-flight provisioning jobs. Rotate between installs.
 - `DOZ_CONTROL_PLANE_URL` — where the ramdisk reaches the API. Must resolve
   from the provisioning VLAN.
-- `DOZ_SECRETS_BACKEND` — `env` for the bench, `vault` in production. CIMC
-  passwords never enter Postgres; `servers.cimc_credential_ref` is a pointer.
+- `DOZ_SECRETS_BACKEND` — `env` for the bench, `file` (what the installer
+  sets up) or `vault` in production. CIMC passwords never enter Postgres;
+  `servers.cimc_credential_ref` is a pointer.
+- `DOZ_BMC_PROTOCOL` — `auto` (IPMI, then Redfish), `ipmi` or `redfish`.
+- `DOZ_IPMI_CIPHER_SUITE` — leave it at `3` unless a BMC refuses it.
+- `DOZ_KVM_URL_TEMPLATE` — only needed if your CIMC's HTML5 viewer lives at a
+  path the launcher does not probe.
 - `DOZ_REQUIRE_WIPE_BEFORE_STOCK` — leave it on. It is what stops a server
   going back on sale with the last customer's data still on it.
 
@@ -222,15 +280,15 @@ Following section 11 of the spec, with the current state marked:
 1. ✅ Bench firmware standardisation + the five validation tests (`bench_validate.py`)
 2. ✅ Data model, inventory, CIMC credential storage
 3. ✅ Job queue and state machine with audit logging
-4. ✅ Power control — the simplest end-to-end proof of the architecture
+4. ✅ Power control — IPMI with Redfish fallback, confirmed by read-back
 5. ✅ iPXE + installer ramdisk + OS templates
 6. ✅ Rescue mode and disk wipe
-7. ✅ Serial console
+7. ✅ Serial console in the browser, vKVM launch
 8. ⚠️ Bandwidth — storage, API and graphs are built; the switch poller is a
    stub, because it depends on a switch model that has not been chosen
 9. ✅ Customer UI
 10. ⚠️ Admin UI and IPAM are built; health *alerting* stores status but does not
-    yet notify anyone
+    yet notify anyone (email is deferred)
 11. ⬜ Billing integration — deliberately not started
 12. ⬜ Beta
 
@@ -248,8 +306,9 @@ they are easy to defer and fatal to defer:
    *before* launch, not after the first incident.
 3. **Abuse handling.** Have a written policy and a working suspend path on day
    one. The admin suspend endpoint flips lifecycle state immediately, but the
-   switch-port shutdown is not yet automated — it records intent and the port
-   must currently be downed by hand. Wire that up before selling anything.
+   switch-port shutdown is not yet automated (deferred for now) — it records
+   intent and the port must currently be downed by hand. Wire that up before
+   selling anything.
 
 Also worth confirming with the facility before you sell: a dedicated OOB port
 or management VLAN per server, remote-hands pricing and response SLA (on EOL

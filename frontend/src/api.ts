@@ -162,6 +162,9 @@ export interface BandwidthSeries {
 export interface AdminServer extends ServerDetail {
   cimc_ip: string
   cimc_credential_ref: string
+  bmc_protocol: string | null
+  ipmi_port: number | null
+  redfish_port: number | null
   cimc_firmware: string | null
   bios_version: string | null
   rack: string | null
@@ -259,10 +262,18 @@ export const api = {
   server: (id: string) => request<ServerDetail>(`/api/v1/servers/${id}`),
   serverJobs: (id: string) => request<Job[]>(`/api/v1/servers/${id}/jobs`),
 
-  power: (id: string, action: 'on' | 'off' | 'cycle' | 'reset') =>
+  power: (id: string, action: PowerAction, force = false) =>
     request<Job>(`/api/v1/servers/${id}/power`, {
       method: 'POST',
-      body: JSON.stringify({ action }),
+      body: JSON.stringify({ action, force }),
+    }),
+
+  powerState: (id: string, fresh = false) =>
+    request<PowerState>(`/api/v1/servers/${id}/power${fresh ? '?fresh=1' : ''}`),
+
+  consoleTicket: (id: string) =>
+    request<{ ticket: string; expires_in: number }>(`/api/v1/console/${id}/ticket`, {
+      method: 'POST',
     }),
 
   reinstall: (
@@ -358,6 +369,25 @@ export const api = {
   releaseIp: (assignmentId: string) =>
     request<void>(`/api/v1/admin/ips/${assignmentId}`, { method: 'DELETE' }),
 
+  // --- admin: BMC ---
+  prepareBmc: (id: string) =>
+    request<Job>(`/api/v1/admin/servers/${id}/prepare-bmc`, { method: 'POST' }),
+  launchKvm: (id: string) =>
+    request<{ html5: string | null; java: string; cimc: string; firmware: string | null }>(
+      `/api/v1/admin/servers/${id}/kvm`,
+      { method: 'POST' },
+    ),
+  bmcSettings: (id: string) =>
+    request<{
+      protocol: string
+      ipmi_port: number
+      redfish_port: number
+      credential_ref: string
+      credential_resolves: boolean
+      username: string | null
+    }>(`/api/v1/admin/servers/${id}/bmc`),
+  system: () => request<SystemStatus>('/api/v1/admin/system'),
+
   // --- admin: jobs ---
   adminJobs: (params: { state?: string; server_id?: string } = {}) => {
     const query = new URLSearchParams(
@@ -446,9 +476,40 @@ export interface AuditEntry {
   detail: Record<string, unknown>
 }
 
-/** URL for the SOL console websocket. The token rides in the query string
- *  because browsers cannot set headers on a websocket handshake. */
-export function consoleUrl(serverId: string): string {
+/**
+ * URL for the SOL console websocket.
+ *
+ * Browsers cannot set headers on a websocket handshake, so authentication
+ * rides in the query string -- as a one-minute, single-use ticket fetched with
+ * the normal bearer token, never the session token itself, which would end up
+ * in the reverse proxy's access log.
+ */
+export async function consoleUrl(serverId: string, force = false): Promise<string> {
+  const { ticket } = await api.consoleTicket(serverId)
   const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
-  return `${protocol}//${location.host}/api/v1/console/${serverId}/sol?token=${getToken()}`
+  const params = new URLSearchParams({ ticket })
+  if (force) params.set('force', '1')
+  return `${protocol}//${location.host}/api/v1/console/${serverId}/sol?${params}`
+}
+
+export type PowerAction = 'on' | 'off' | 'force_off' | 'reset' | 'cycle'
+
+export interface PowerState {
+  state: 'on' | 'off' | 'unknown'
+  via: string | null
+  checked_at: string
+  error: string | null
+  cached: boolean
+}
+
+export interface SystemStatus {
+  database: string
+  redis: string
+  workers: Array<{ name: string; queues: string[] }>
+  queues: Record<string, { workers: string[]; handles: string }>
+  ipmitool: { path: string; version: string } | null
+  bmc_protocol: string
+  ipmi_cipher_suite: string
+  secrets_backend: string
+  workers_error?: string
 }

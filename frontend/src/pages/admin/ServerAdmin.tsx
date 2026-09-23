@@ -12,6 +12,7 @@ import {
 } from '../../api'
 import { Banner, Empty, Modal, Pill, Progress, formatTime, relativeTime } from '../../components'
 import { useAsync, usePolling } from '../../hooks'
+import { PowerControls } from '../../power'
 
 const ACTIVE_JOB_STATES = ['queued', 'running']
 
@@ -111,6 +112,15 @@ export default function ServerAdmin() {
           <table style={{ marginTop: 8 }}>
             <tbody>
               <tr><td className="subtle">CIMC</td><td className="mono">{s.cimc_ip}</td></tr>
+              <tr>
+                <td className="subtle">Control</td>
+                <td>
+                  {(s.bmc_protocol ?? 'default').toUpperCase()}
+                  <span className="subtle" style={{ fontSize: 12 }}>
+                    {' '}· IPMI :{s.ipmi_port ?? 623} · HTTPS :{s.redfish_port ?? 443}
+                  </span>
+                </td>
+              </tr>
               <tr><td className="subtle">Credential ref</td><td className="mono">{s.cimc_credential_ref}</td></tr>
               <tr>
                 <td className="subtle">Firmware</td>
@@ -128,17 +138,22 @@ export default function ServerAdmin() {
                   {s.provisioning_mac ?? <span className="pill warning">not set — installs will refuse</span>}
                 </td>
               </tr>
-              <tr><td className="subtle">Power</td><td>{s.last_power_state ?? '—'}</td></tr>
             </tbody>
           </table>
           <div className="row" style={{ marginTop: 12 }}>
+            <button
+              disabled={busy}
+              title="Switch on IPMI over LAN and Serial-over-LAN, point BIOS console redirection at it, then check both work"
+              onClick={() => act(() => api.prepareBmc(id), 'Prepare BMC queued: enabling IPMI over LAN and SOL.')}
+            >
+              Prepare BMC
+            </button>
             <button disabled={busy} onClick={() => act(() => api.syncInventory(id), 'Inventory sync queued.')}>
               Sync inventory
             </button>
             <button disabled={busy} onClick={() => act(() => api.healthCheck(id), 'Health check queued.')}>
               Check health
             </button>
-            <Link className="button" to={`/servers/${id}/console`}>Serial console</Link>
           </div>
         </div>
 
@@ -176,21 +191,38 @@ export default function ServerAdmin() {
         </div>
       </div>
 
-      {/* ---- Actions ------------------------------------------------------ */}
+      {/* ---- Power and console ------------------------------------------ */}
+      <h2>Power</h2>
+      <div className="card">
+        <PowerControls serverId={id} isAdmin activeJob={activeJob ?? null} onChanged={refresh} pollMs={30000} />
+      </div>
+
+      <h2>Console</h2>
+      <div className="card">
+        <div className="spread" style={{ flexWrap: 'wrap' }}>
+          <div>
+            <strong>Serial console</strong>
+            <div className="subtle">
+              In the browser, through the platform. BIOS, boot loader and OS, from power-on.
+            </div>
+          </div>
+          <Link className="button primary" to={`/servers/${id}/console`}>Open serial console</Link>
+        </div>
+        <hr className="divider" />
+        <div className="spread" style={{ flexWrap: 'wrap', alignItems: 'flex-start' }}>
+          <div style={{ flex: '1 1 360px' }}>
+            <strong>KVM (graphical)</strong>
+            <div className="subtle">
+              The CIMC's own vKVM, opened with one-time tokens. Your browser connects to the CIMC
+              directly, so it has to be able to reach <span className="mono">{s.cimc_ip}</span>.
+            </div>
+          </div>
+          <KvmLauncher serverId={id} cimcIp={s.cimc_ip} port={s.redfish_port} />
+        </div>
+      </div>
+
       <h2>Actions</h2>
       <div className="card">
-        <div className="spread" style={{ marginBottom: 12 }}>
-          <div>
-            <strong>Power</strong>
-            <div className="subtle">{activeJob ? 'Locked while a job is running.' : 'Queued as jobs; watch the progress card above.'}</div>
-          </div>
-          <div className="row">
-            <button disabled={locked} onClick={() => act(() => api.power(id, 'on'), 'Power on queued.')}>On</button>
-            <button disabled={locked} onClick={() => act(() => api.power(id, 'off'), 'Graceful shutdown queued.')}>Shut down</button>
-            <button disabled={locked} onClick={() => act(() => api.power(id, 'cycle'), 'Power cycle queued.')}>Cycle</button>
-            <button className="danger" disabled={locked} onClick={() => act(() => api.power(id, 'reset'), 'Hard reset queued.')}>Hard reset</button>
-          </div>
-        </div>
 
         <div className="spread" style={{ marginBottom: 12 }}>
           <div>
@@ -714,12 +746,16 @@ function EditModal({ server, onClose, onDone }: { server: AdminServer; onClose: 
     customer_vlan: server.customer_vlan?.toString() ?? '',
     provisioning_mac: server.provisioning_mac ?? '',
     cimc_credential_ref: server.cimc_credential_ref,
+    cimc_ip: server.cimc_ip,
+    bmc_protocol: server.bmc_protocol ?? '',
+    ipmi_port: server.ipmi_port?.toString() ?? '',
+    redfish_port: server.redfish_port?.toString() ?? '',
     notes: server.notes ?? '',
   })
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
 
-  const set = (k: keyof typeof form) => (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) =>
+  const set = (k: keyof typeof form) => (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) =>
     setForm((f) => ({ ...f, [k]: e.target.value }))
 
   async function submit(event: React.FormEvent) {
@@ -737,6 +773,10 @@ function EditModal({ server, onClose, onDone }: { server: AdminServer; onClose: 
         customer_vlan: form.customer_vlan ? Number(form.customer_vlan) : null,
         provisioning_mac: form.provisioning_mac || null,
         cimc_credential_ref: form.cimc_credential_ref,
+        cimc_ip: form.cimc_ip,
+        bmc_protocol: form.bmc_protocol || null,
+        ipmi_port: form.ipmi_port ? Number(form.ipmi_port) : null,
+        redfish_port: form.redfish_port ? Number(form.redfish_port) : null,
         notes: form.notes || null,
       })
       onDone('Saved.')
@@ -754,6 +794,18 @@ function EditModal({ server, onClose, onDone }: { server: AdminServer; onClose: 
         <div className="grid cols-2">
           <div className="field"><label>Hostname</label><input value={form.hostname} onChange={set('hostname')} /></div>
           <div className="field"><label>Credential ref</label><input className="mono" value={form.cimc_credential_ref} onChange={set('cimc_credential_ref')} /></div>
+          <div className="field"><label>CIMC IP</label><input className="mono" value={form.cimc_ip} onChange={set('cimc_ip')} /></div>
+          <div className="field">
+            <label>Power/boot control</label>
+            <select value={form.bmc_protocol} onChange={set('bmc_protocol')}>
+              <option value="">Platform default</option>
+              <option value="auto">Auto — IPMI, then Redfish</option>
+              <option value="ipmi">IPMI only</option>
+              <option value="redfish">Redfish only</option>
+            </select>
+          </div>
+          <div className="field"><label>IPMI port (blank = 623)</label><input type="number" min={1} max={65535} value={form.ipmi_port} onChange={set('ipmi_port')} /></div>
+          <div className="field"><label>HTTPS port (blank = 443)</label><input type="number" min={1} max={65535} value={form.redfish_port} onChange={set('redfish_port')} /></div>
           <div className="field"><label>Datacenter</label><input value={form.datacenter} onChange={set('datacenter')} /></div>
           <div className="field"><label>Rack</label><input value={form.rack} onChange={set('rack')} /></div>
           <div className="field"><label>Rack unit</label><input type="number" min={1} max={60} value={form.rack_unit} onChange={set('rack_unit')} /></div>
@@ -769,5 +821,61 @@ function EditModal({ server, onClose, onDone }: { server: AdminServer; onClose: 
         </div>
       </form>
     </Modal>
+  )
+}
+
+// ---------------------------------------------------------------------------
+
+function KvmLauncher({ serverId, cimcIp, port }: { serverId: string; cimcIp: string; port: number | null }) {
+  const [busy, setBusy] = useState(false)
+  const [links, setLinks] = useState<{ html5: string | null; java: string; cimc: string } | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const cimcUrl = `https://${cimcIp}${port ? `:${port}` : ''}/`
+
+  async function launch() {
+    setBusy(true)
+    setError(null)
+    // Open the window synchronously, inside the click, or popup blockers
+    // swallow it; point it at the viewer once the tokens arrive.
+    const win = window.open('about:blank', '_blank')
+    try {
+      const result = await api.launchKvm(serverId)
+      setLinks(result)
+      if (win) {
+        if (result.html5) win.location.href = result.html5
+        else win.close()
+      }
+    } catch (e) {
+      win?.close()
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div style={{ textAlign: 'right', marginLeft: 'auto' }}>
+      <div className="row" style={{ justifyContent: 'flex-end' }}>
+        <button className="primary" onClick={launch} disabled={busy}>
+          {busy ? 'Getting tokens…' : 'Launch KVM'}
+        </button>
+        <a className="button" href={cimcUrl} target="_blank" rel="noreferrer">
+          CIMC web UI
+        </a>
+      </div>
+      {links && !links.html5 && (
+        <div className="subtle" style={{ fontSize: 12, marginTop: 6 }}>
+          No HTML5 viewer found on this firmware.{' '}
+          <a href={links.java}>Java launcher (.jnlp)</a> or use the CIMC web UI.
+        </div>
+      )}
+      {error && (
+        <div style={{ fontSize: 12, marginTop: 6, color: 'var(--crit)', maxWidth: 420 }}>{error}</div>
+      )}
+      <div className="subtle" style={{ fontSize: 12, marginTop: 6, maxWidth: 420 }}>
+        First time? Open the CIMC web UI once and accept its certificate, or the KVM
+        window will be blocked.
+      </div>
+    </div>
   )
 }

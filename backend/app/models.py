@@ -132,6 +132,12 @@ class Server(Base, TimestampMixin):
     bios_version: Mapped[str | None] = mapped_column(String(64))
     #: Redfish system path, discovered once and cached.
     redfish_system_path: Mapped[str | None] = mapped_column(String(255))
+    #: auto | redfish | ipmi. Null means the global DOZ_BMC_PROTOCOL.
+    bmc_protocol: Mapped[str | None] = mapped_column(String(16))
+    #: Non-standard BMC ports, for BMCs behind a port forward (and the
+    #: simulator). Null means 623 and 443.
+    ipmi_port: Mapped[int | None] = mapped_column(Integer)
+    redfish_port: Mapped[int | None] = mapped_column(Integer)
 
     # --- physical ----------------------------------------------------------
     datacenter: Mapped[str | None] = mapped_column(String(64))

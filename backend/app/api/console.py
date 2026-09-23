@@ -1,172 +1,430 @@
 """Serial-over-LAN console, bridged to the browser over a websocket.
 
-`ipmitool sol activate` is spawned on the worker side of the network boundary
-and its stdio is pumped across a websocket. The browser never learns the CIMC
-address or its credentials.
+    browser (xterm.js) <-- websocket --> this module <-- pty --> ipmitool sol activate
+                                                                     |
+                                                              RMCP+ / UDP 623
+                                                                     |
+                                                                   CIMC
 
-The CIMC allows exactly one SOL session per server. If a session is already
-open, `ipmitool` says so and exits; that message is forwarded verbatim rather
-than being turned into an opaque failure, because "someone else has the
-console" is a thing the customer can act on.
+Why a pseudo-terminal: ipmitool puts its stdin into raw mode and expects a
+terminal on the other end. Given plain pipes it limps along, printing termios
+errors; given a pty it behaves exactly as it does in an operator's shell,
+byte-for-byte, which is what BIOS screens with cursor addressing need. OpenStack
+Ironic runs ipmitool SOL under a pty for the same reason.
+
+Wire protocol on the websocket:
+    binary frames, both directions   terminal bytes
+    text frames, server -> browser   JSON status: {"type": "status", "state": ...}
+    text frames, browser -> server   ignored (reserved for control messages)
+Keeping input binary-only means no control message can ever be mistaken for
+keystrokes.
+
+Authentication: the browser first POSTs for a ticket (normal bearer auth),
+then opens the websocket with `?ticket=`. Tickets live for a minute and work
+once, so the one that ends up in an nginx access log is useless. A session JWT
+in the URL -- what this used to do -- would have been a credential in the log.
+
+The CIMC has exactly one SOL slot. When it is taken, the browser is told
+("busy") and can reconnect with `force=1`, which releases the slot first.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import os
+import pty
+import secrets as pysecrets
+import signal
+import subprocess
+import threading
+import time
 import uuid
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 
-from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect, status
+import jwt
+from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, status
+from fastapi.concurrency import run_in_threadpool
 from sqlalchemy import select
-from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.db import get_db
-from app.enums import ActorType
+from app.db import SessionLocal
+from app.deps import current_customer, get_owned_server
+from app.drivers import BMCError, get_ipmi_driver
+from app.drivers.ipmi import IpmiDriver
+from app.enums import ActorType, ServerState
 from app.models import Customer, Server, Subscription
-from app.secrets import get_secrets_backend
-from app.security import decode_access_token
 from app.services.audit import record_audit
 
 router = APIRouter(prefix="/api/v1/console", tags=["console"])
 
+#: ipmitool's escape character. Ctrl-] -- the telnet escape -- so nobody
+#: types it by accident at the start of a line and drops their own session.
+ESCAPE_CHAR = "\x1d"
 
-def _authorise(db: Session, token: str, server_id: uuid.UUID) -> tuple[Customer, Server] | None:
-    """Resolve a websocket token to a customer entitled to this console.
+#: ipmitool output -> console state for the UI. First match wins.
+_MARKERS: list[tuple[bytes, str, str]] = [
+    (b"SOL Session operational", "connected", ""),
+    (b"SOL payload already active on another session", "busy",
+     "Someone else has this server's serial console open."),
+    (b"SOL payload disabled", "sol_disabled",
+     "Serial-over-LAN is disabled on this BMC. An admin can run Prepare BMC."),
+    (b"Unable to establish IPMI v2 / RMCP+ session", "ipmi_unreachable",
+     "Could not open an IPMI session: wrong credentials, IPMI over LAN disabled "
+     "on the CIMC, or UDP 623 blocked."),
+    (b"Insufficient privilege level", "ipmi_unreachable",
+     "The BMC user is not an IPMI administrator."),
+]
 
-    The token arrives as a query parameter: browsers cannot set headers on a
-    websocket handshake. It is a normal short-lived access token, so the
-    exposure is the same as any URL-borne credential — which is why the SOL
-    endpoint is the only place it is accepted this way.
-    """
+
+# ---------------------------------------------------------------------------
+# Tickets
+# ---------------------------------------------------------------------------
+
+_used_tickets: dict[str, float] = {}
+_used_lock = threading.Lock()
+
+
+def issue_ticket(customer_id: uuid.UUID, server_id: uuid.UUID) -> tuple[str, int]:
+    ttl = settings.console_ticket_ttl_seconds
+    now = datetime.now(UTC)
+    token = jwt.encode(
+        {
+            "typ": "console",
+            "sub": str(customer_id),
+            "srv": str(server_id),
+            "jti": pysecrets.token_urlsafe(12),
+            "iat": int(now.timestamp()),
+            "exp": int((now + timedelta(seconds=ttl)).timestamp()),
+        },
+        settings.jwt_secret,
+        algorithm=settings.jwt_algorithm,
+    )
+    return token, ttl
+
+
+def redeem_ticket(ticket: str, server_id: uuid.UUID) -> uuid.UUID | None:
+    """Customer id for a valid, unused ticket for this server; else None."""
     try:
-        payload = decode_access_token(token)
-        customer_id = uuid.UUID(payload["sub"])
-    except Exception:  # noqa: BLE001 - any decode failure is simply a refusal
-        return None
-
-    customer = db.get(Customer, customer_id)
-    server = db.get(Server, server_id)
-    if customer is None or not customer.is_active or server is None:
-        return None
-    if customer.is_admin:
-        return customer, server
-
-    owns = db.execute(
-        select(Subscription.id).where(
-            Subscription.server_id == server_id,
-            Subscription.customer_id == customer.id,
-            Subscription.ended_at.is_(None),
+        claims = jwt.decode(
+            ticket, settings.jwt_secret, algorithms=[settings.jwt_algorithm],
+            options={"require": ["exp", "sub", "jti"]},
         )
-    ).scalar_one_or_none()
-    return (customer, server) if owns else None
+    except jwt.PyJWTError:
+        return None
+    if claims.get("typ") != "console" or claims.get("srv") != str(server_id):
+        return None
+    now = time.time()
+    with _used_lock:
+        for jti, expiry in list(_used_tickets.items()):
+            if expiry < now:
+                del _used_tickets[jti]
+        if claims["jti"] in _used_tickets:
+            return None
+        _used_tickets[claims["jti"]] = float(claims["exp"])
+    try:
+        return uuid.UUID(claims["sub"])
+    except ValueError:
+        return None
+
+
+@router.post("/{server_id}/ticket")
+def console_ticket(
+    server: Server = Depends(get_owned_server),
+    customer: Customer = Depends(current_customer),
+) -> dict:
+    if ServerState(server.state) is ServerState.SUSPENDED and not customer.is_admin:
+        raise HTTPException(status_code=409, detail="server is suspended; contact support")
+    ticket, ttl = issue_ticket(customer.id, server.id)
+    return {"ticket": ticket, "expires_in": ttl}
+
+
+# ---------------------------------------------------------------------------
+# Session setup (blocking DB work, run in a thread)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ConsoleContext:
+    customer_id: uuid.UUID
+    customer_email: str
+    is_admin: bool
+    server_id: uuid.UUID
+    serial: str
+    driver: IpmiDriver
+
+
+def _open_context(
+    customer_id: uuid.UUID, server_id: uuid.UUID, force: bool
+) -> ConsoleContext | None:
+    """Re-check entitlement and load the BMC credential.
+
+    Uses its own short-lived session: holding a pooled DB connection for the
+    hours a console can stay open would starve the API.
+    """
+    with SessionLocal() as db:
+        customer = db.get(Customer, customer_id)
+        server = db.get(Server, server_id)
+        if customer is None or not customer.is_active or server is None:
+            return None
+        if not customer.is_admin:
+            owns = db.execute(
+                select(Subscription.id).where(
+                    Subscription.server_id == server_id,
+                    Subscription.customer_id == customer.id,
+                    Subscription.ended_at.is_(None),
+                )
+            ).scalar_one_or_none()
+            if owns is None or ServerState(server.state) is ServerState.SUSPENDED:
+                return None
+        try:
+            driver = get_ipmi_driver(server)
+        except Exception:  # noqa: BLE001 - a missing credential is a refusal, not a crash
+            return None
+        record_audit(
+            db,
+            action="console.sol_opened",
+            actor_type=ActorType.ADMIN if customer.is_admin else ActorType.CUSTOMER,
+            actor_id=customer.id,
+            actor_label=customer.email,
+            target_type="server",
+            target_id=str(server_id),
+            detail={"force": force},
+        )
+        db.commit()
+        return ConsoleContext(
+            customer_id=customer.id,
+            customer_email=customer.email,
+            is_admin=customer.is_admin,
+            server_id=server.id,
+            serial=server.serial,
+            driver=driver,
+        )
+
+
+def _audit_close(ctx: ConsoleContext, detail: dict) -> None:
+    with SessionLocal() as db:
+        record_audit(
+            db,
+            action="console.sol_closed",
+            actor_type=ActorType.ADMIN if ctx.is_admin else ActorType.CUSTOMER,
+            actor_id=ctx.customer_id,
+            actor_label=ctx.customer_email,
+            target_type="server",
+            target_id=str(ctx.server_id),
+            detail=detail,
+        )
+        db.commit()
+
+
+# ---------------------------------------------------------------------------
+# The bridge
+# ---------------------------------------------------------------------------
 
 
 @router.websocket("/{server_id}/sol")
 async def serial_console(
     websocket: WebSocket,
     server_id: uuid.UUID,
-    token: str = Query(...),
-    db: Session = Depends(get_db),
+    ticket: str = Query(...),
+    force: bool = Query(False),
 ) -> None:
-    authorised = _authorise(db, token, server_id)
-    if authorised is None:
+    customer_id = redeem_ticket(ticket, server_id)
+    if customer_id is None:
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
-    customer, server = authorised
+    ctx = await run_in_threadpool(_open_context, customer_id, server_id, force)
+    if ctx is None:
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
 
-    credential = get_secrets_backend().get_bmc_credential(server.cimc_credential_ref)
     await websocket.accept()
-
-    record_audit(
-        db,
-        action="console.sol_opened",
-        actor_type=ActorType.ADMIN if customer.is_admin else ActorType.CUSTOMER,
-        actor_id=customer.id,
-        actor_label=customer.email,
-        target_type="server",
-        target_id=str(server_id),
-    )
-    db.commit()
-
-    # -I lanplus is required for IPMI 2.0; -e sets the escape character to one
-    # a customer will not type by accident. The password goes through -E and
-    # the environment rather than -P: an argv password is readable by every
-    # process on the host.
-    process = await asyncio.create_subprocess_exec(
-        settings.ipmitool_path,
-        "-I", "lanplus",
-        "-H", str(server.cimc_ip),
-        "-U", credential.username,
-        "-E",
-        "-e", "&",
-        "sol", "activate",
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
-        env={"IPMI_PASSWORD": credential.password, "PATH": os.environ.get("PATH", "")},
-    )
-
-    async def pump_out() -> None:
-        assert process.stdout is not None
-        while True:
-            chunk = await process.stdout.read(1024)
-            if not chunk:
-                break
-            await websocket.send_bytes(chunk)
-
-    async def pump_in() -> None:
-        assert process.stdin is not None
-        while True:
-            message = await websocket.receive()
-            if message.get("type") == "websocket.disconnect":
-                break
-            data = message.get("bytes")
-            if data is None and message.get("text") is not None:
-                data = message["text"].encode()
-            if data:
-                process.stdin.write(data)
-                await process.stdin.drain()
-
-    outbound = asyncio.create_task(pump_out())
-    inbound = asyncio.create_task(pump_in())
-
+    session = SolSession(websocket, ctx, force=force)
     try:
-        # Either direction ending tears the session down: a half-open console
-        # would hold the CIMC's single SOL slot indefinitely.
-        done, pending = await asyncio.wait(
-            [outbound, inbound],
-            timeout=settings.sol_idle_timeout_seconds,
-            return_when=asyncio.FIRST_COMPLETED,
-        )
+        await session.run()
+    finally:
+        await session.cleanup()
+        await run_in_threadpool(_audit_close, ctx, session.summary())
+
+
+class SolSession:
+    def __init__(self, websocket: WebSocket, ctx: ConsoleContext, *, force: bool) -> None:
+        self.ws = websocket
+        self.ctx = ctx
+        self.force = force
+        self.proc: subprocess.Popen | None = None
+        self.master: int | None = None
+        self.started = time.monotonic()
+        self.last_activity = self.started
+        self.bytes_in = 0
+        self.bytes_out = 0
+        self.state = "connecting"
+        self.reason = ""
+        self._head = b""  # first bytes of ipmitool output, scanned for markers
+        self._closed = False
+
+    async def status(self, state: str, message: str = "") -> None:
+        self.state = state
+        if message:
+            self.reason = message
+        with contextlib.suppress(Exception):
+            await self.ws.send_text(
+                json.dumps({"type": "status", "state": state, "message": message})
+            )
+
+    def summary(self) -> dict:
+        return {
+            "duration_s": int(time.monotonic() - self.started),
+            "bytes_in": self.bytes_in,
+            "bytes_out": self.bytes_out,
+            "final_state": self.state,
+            "reason": self.reason,
+        }
+
+    async def run(self) -> None:
+        await self.status("connecting", f"Opening serial console on {self.ctx.serial}...")
+        if self.force:
+            await self.status("connecting", "Releasing the existing session...")
+            await run_in_threadpool(self.ctx.driver.sol_deactivate)
+
+        master, slave = pty.openpty()
+        cmd = [*self.ctx.driver.base_command(), "-e", ESCAPE_CHAR, "sol", "activate"]
+        try:
+            self.proc = subprocess.Popen(  # noqa: S603 - argv, no shell
+                cmd,
+                stdin=slave,
+                stdout=slave,
+                stderr=slave,
+                env=self.ctx.driver.environment(),
+                start_new_session=True,
+                close_fds=True,
+            )
+        except FileNotFoundError:
+            os.close(master)
+            os.close(slave)
+            await self.status("error", "ipmitool is not installed on the management server.")
+            return
+        os.close(slave)
+        os.set_blocking(master, False)
+        self.master = master
+
+        loop = asyncio.get_running_loop()
+        output: asyncio.Queue[bytes | None] = asyncio.Queue()
+
+        def readable() -> None:
+            try:
+                data = os.read(master, 65536)
+            except BlockingIOError:
+                return
+            except OSError:
+                data = b""  # EIO: the child closed its end
+            if not data:
+                loop.remove_reader(master)
+                output.put_nowait(None)
+                return
+            output.put_nowait(data)
+
+        loop.add_reader(master, readable)
+
+        tasks = [
+            asyncio.create_task(self._pump_out(output)),
+            asyncio.create_task(self._pump_in()),
+            asyncio.create_task(self._watchdog()),
+        ]
+        _done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
         for task in pending:
             task.cancel()
-    except WebSocketDisconnect:
-        pass
-    finally:
-        # `sol deactivate` matters as much as killing the process: without it
-        # the CIMC keeps the slot open and the next connect is refused.
-        with contextlib.suppress(ProcessLookupError):
-            process.terminate()
-        with contextlib.suppress(asyncio.TimeoutError):
-            await asyncio.wait_for(process.wait(), timeout=5)
-        await _deactivate_sol(server, credential)
-        with contextlib.suppress(RuntimeError):
-            await websocket.close()
+        await asyncio.gather(*pending, return_exceptions=True)
 
+    async def _pump_out(self, output: asyncio.Queue[bytes | None]) -> None:
+        while True:
+            data = await output.get()
+            if data is None:
+                code = self.proc.poll() if self.proc else None
+                if self.state not in {"busy", "sol_disabled", "ipmi_unreachable"}:
+                    await self.status("closed", f"Console session ended (ipmitool exited {code}).")
+                return
+            self.last_activity = time.monotonic()
+            self.bytes_out += len(data)
+            if self.state == "connecting":
+                await self._scan(data)
+            await self.ws.send_bytes(data)
 
-async def _deactivate_sol(server: Server, credential) -> None:  # noqa: ANN001
-    deactivate = await asyncio.create_subprocess_exec(
-        settings.ipmitool_path,
-        "-I", "lanplus",
-        "-H", str(server.cimc_ip),
-        "-U", credential.username,
-        "-E",
-        "sol", "deactivate",
-        stdout=asyncio.subprocess.DEVNULL,
-        stderr=asyncio.subprocess.DEVNULL,
-        env={"IPMI_PASSWORD": credential.password, "PATH": os.environ.get("PATH", "")},
-    )
-    with contextlib.suppress(asyncio.TimeoutError):
-        await asyncio.wait_for(deactivate.wait(), timeout=10)
+    async def _scan(self, data: bytes) -> None:
+        self._head = (self._head + data)[-4096:]
+        for marker, state, message in _MARKERS:
+            if marker in self._head:
+                await self.status(state, message)
+                return
+
+    async def _pump_in(self) -> None:
+        while True:
+            message = await self.ws.receive()
+            if message.get("type") == "websocket.disconnect":
+                self.reason = self.reason or "browser disconnected"
+                return
+            data = message.get("bytes")
+            if not data:
+                continue  # text frames are control messages; none are defined yet
+            self.last_activity = time.monotonic()
+            self.bytes_in += len(data)
+            await self._write(data)
+
+    async def _write(self, data: bytes) -> None:
+        assert self.master is not None
+        view = memoryview(data)
+        while view:
+            try:
+                written = os.write(self.master, view)
+                view = view[written:]
+            except BlockingIOError:
+                await asyncio.sleep(0.01)
+            except OSError:
+                return
+
+    async def _watchdog(self) -> None:
+        while True:
+            await asyncio.sleep(5)
+            now = time.monotonic()
+            if now - self.last_activity > settings.sol_idle_timeout_seconds:
+                await self.status(
+                    "closed",
+                    f"Closed after {settings.sol_idle_timeout_seconds // 60} minutes with no "
+                    "activity, to free the BMC's console for others.",
+                )
+                return
+            if now - self.started > settings.sol_max_session_seconds:
+                await self.status("closed", "Maximum console session length reached.")
+                return
+
+    async def cleanup(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        loop = asyncio.get_running_loop()
+        if self.master is not None:
+            with contextlib.suppress(Exception):
+                loop.remove_reader(self.master)
+            with contextlib.suppress(OSError):
+                os.close(self.master)
+        if self.proc is not None and self.proc.poll() is None:
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.killpg(self.proc.pid, signal.SIGTERM)
+            for _ in range(30):
+                if self.proc.poll() is not None:
+                    break
+                await asyncio.sleep(0.1)
+            if self.proc.poll() is None:
+                with contextlib.suppress(ProcessLookupError, PermissionError):
+                    os.killpg(self.proc.pid, signal.SIGKILL)
+        # Killing ipmitool does not always tell the BMC; without an explicit
+        # deactivate the slot stays taken and the next person is refused.
+        # Skipped when we never got the slot in the first place, so we do not
+        # knock someone else's working session off.
+        if self.state not in {"busy", "ipmi_unreachable", "error"}:
+            with contextlib.suppress(BMCError):
+                await run_in_threadpool(self.ctx.driver.sol_deactivate)
+        with contextlib.suppress(Exception):
+            await self.ws.close()

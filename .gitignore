@@ -8,6 +8,11 @@ venv/
 .ruff_cache/
 .coverage
 htmlcov/
+# Redis snapshot written when redis-server runs from a checkout.
+dump.rdb
+
+# doz.sh dev mode: logs, pid files, simulator state.
+.run/
 
 node_modules/
 dist/

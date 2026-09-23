@@ -38,7 +38,12 @@ jobs:
           cache: pip
 
       - name: Install
-        run: pip install -e ".[dev]"
+        run: |
+          # ipmitool and OpenIPMI's ipmi_sim: the IPMI integration tests drive
+          # a real RMCP+ stack rather than mocks, and are skipped without them.
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends ipmitool openipmi
+          pip install -e ".[dev]"
 
       - name: Lint
         run: ruff check app scripts tests
@@ -79,3 +84,35 @@ jobs:
           sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
           for f in doz.sh installer/build-ramdisk.sh deploy/*.sh; do bash -n "$f"; done
           shellcheck -S warning -e SC1091,SC2086,SC2046 doz.sh installer/build-ramdisk.sh deploy/*.sh || true
+
+  # The real thing: install the platform as the `doz` systemd service on a
+  # fresh Ubuntu runner (a real VM with systemd), then drive power and the
+  # serial console through nginx against the BMC simulator.
+  install-as-a-service:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the simulator's dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends openipmi ipmitool
+
+      - name: Install DedicatedOZ as a service
+        run: sudo ./doz.sh install --no-pxe --admin-email ci@example.com
+
+      - name: Smoke test (power + serial console through nginx)
+        run: sudo ./deploy/smoke-test.sh
+
+      - name: Re-run the installer as an update
+        run: sudo ./doz.sh update && sudo ./deploy/smoke-test.sh
+
+      - name: Service survives a restart
+        run: |
+          sudo systemctl restart doz
+          sleep 5
+          sudo /opt/doz/doz.sh status
+
+      - name: Logs on failure
+        if: failure()
+        run: sudo journalctl -u 'doz*' --no-pager -n 200

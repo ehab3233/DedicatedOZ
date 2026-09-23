@@ -48,7 +48,40 @@ class Settings(BaseSettings):
     redfish_timeout_seconds: int = 30
     redfish_max_retries: int = 3
 
+    # Which protocol drives power and boot. "auto" uses IPMI first (tens of
+    # milliseconds per call) and falls back to Redfish when IPMI fails, then
+    # stays on Redfish for the rest of that job. "ipmi" and "redfish" force
+    # one. Can be overridden per server. Inventory and virtual media always
+    # use Redfish; the serial console is always IPMI.
+    bmc_protocol: str = "auto"
+
+    # IPMI over LAN (ipmitool lanplus). Cipher suite 3 is pinned by default:
+    # ipmitool 1.8.19 otherwise probes for the best suite, and a BMC that does
+    # not answer that probe costs ten seconds on every single call -- long
+    # enough to blow the IPMI 60-second boot-flag window during a reinstall.
+    # Empty string lets ipmitool choose.
+    ipmi_cipher_suite: str = "3"
+    ipmi_port: int = 623
+    ipmi_timeout_seconds: int = 20
+    # Add options=efiboot to IPMI boot device overrides. Only for servers
+    # booting in UEFI mode; the guide sets the M4s to legacy.
+    ipmi_boot_efi: bool = False
+
+    # Synchronous power-state reads for the panel. Short, because a person is
+    # waiting on them; cached briefly so a busy page cannot hammer the BMC.
+    bmc_status_timeout_seconds: int = 10
+    bmc_status_cache_seconds: int = 10
+
+    # vKVM launch URL. Empty means probe the CIMC for the HTML5 viewer and
+    # fall back to the Java launcher. Placeholders: {host} {tkn1} {tkn2}.
+    kvm_url_template: str = ""
+
     # --- provisioning ------------------------------------------------------
+    # How long a graceful shutdown may take before the job reports that the OS
+    # ignored it. It is never escalated to a forced power-off automatically:
+    # that is the operator's call, and it is one click away.
+    graceful_shutdown_timeout_seconds: int = 300
+
     # How long a provisioning job waits for the installer to phone home.
     install_timeout_seconds: int = 60 * 45
     # How long an installer callback token stays valid.
@@ -63,7 +96,13 @@ class Settings(BaseSettings):
 
     # --- console -----------------------------------------------------------
     ipmitool_path: str = "ipmitool"
-    sol_idle_timeout_seconds: int = 900
+    # A console with no traffic either way for this long is closed, which
+    # frees the BMC's single SOL slot for the next person.
+    sol_idle_timeout_seconds: int = 1800
+    # Hard cap regardless of activity.
+    sol_max_session_seconds: int = 8 * 3600
+    # Console websocket tickets: single use, this short.
+    console_ticket_ttl_seconds: int = 60
 
     # --- misc --------------------------------------------------------------
     # Only honour X-Forwarded-For when a reverse proxy we control sets it. On a

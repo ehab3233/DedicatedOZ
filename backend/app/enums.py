@@ -65,9 +65,11 @@ TERMINAL_JOB_STATES = {JobState.SUCCEEDED, JobState.FAILED, JobState.CANCELLED}
 
 class JobType(enum.StrEnum):
     POWER_ON = "power_on"
-    POWER_OFF = "power_off"
+    POWER_OFF = "power_off"  # graceful: ACPI, the OS decides
+    POWER_FORCE_OFF = "power_force_off"
     POWER_CYCLE = "power_cycle"
     POWER_RESET = "power_reset"
+    BMC_SETUP = "bmc_setup"
     INSTALL = "install"
     RESCUE = "rescue"
     WIPE = "wipe"

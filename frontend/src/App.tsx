@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { Suspense, lazy, useEffect, useState } from 'react'
 import { NavLink, Navigate, Route, Routes, useNavigate } from 'react-router-dom'
 import { api, getToken, setToken, type Me } from './api'
 import Login from './pages/Login'
@@ -6,7 +6,6 @@ import Servers from './pages/Servers'
 import ServerDetail from './pages/ServerDetail'
 import JobDetail from './pages/JobDetail'
 import SSHKeys from './pages/SSHKeys'
-import Console from './pages/Console'
 import AdminLayout from './pages/admin/AdminLayout'
 import Fleet from './pages/admin/Fleet'
 import ServerAdmin from './pages/admin/ServerAdmin'
@@ -14,6 +13,9 @@ import Customers from './pages/admin/Customers'
 import IPAM from './pages/admin/IPAM'
 import Jobs from './pages/admin/Jobs'
 import Audit from './pages/admin/Audit'
+
+// xterm.js is most of the bundle; only the console page needs it.
+const Console = lazy(() => import('./pages/Console'))
 
 export default function App() {
   const [me, setMe] = useState<Me | null>(null)
@@ -68,10 +70,17 @@ export default function App() {
 
       <Routes>
         <Route path="/" element={<Navigate to={me.is_admin ? '/admin' : '/servers'} replace />} />
-        <Route path="/login" element={<Navigate to="/servers" replace />} />
+        <Route path="/login" element={<Navigate to={me.is_admin ? '/admin' : '/servers'} replace />} />
         <Route path="/servers" element={<Servers />} />
         <Route path="/servers/:id" element={<ServerDetail isAdmin={me.is_admin} />} />
-        <Route path="/servers/:id/console" element={<Console />} />
+        <Route
+          path="/servers/:id/console"
+          element={
+            <Suspense fallback={<main className="page subtle">Loading console…</main>}>
+              <Console isAdmin={me.is_admin} />
+            </Suspense>
+          }
+        />
         <Route path="/jobs/:id" element={<JobDetail isAdmin={me.is_admin} />} />
         <Route path="/ssh-keys" element={<SSHKeys />} />
         {me.is_admin && (

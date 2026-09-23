@@ -201,6 +201,12 @@ class TestVirtualMedia:
             f"{BASE}/redfish/v1/Managers",
             json={"Members": [{"@odata.id": MANAGER}]},
         )
+        # Redfish 1.0 (the M4's CIMC): the Manager links to its VirtualMedia.
+        responses.add(
+            responses.GET,
+            f"{BASE}{MANAGER}",
+            json={"@odata.id": MANAGER, "VirtualMedia": {"@odata.id": self.VM_COLLECTION}},
+        )
         responses.add(
             responses.GET,
             f"{BASE}{self.VM_COLLECTION}",
@@ -284,6 +290,27 @@ class TestVirtualMedia:
 
         with pytest.raises(BMCError, match="did not report as inserted"):
             driver().insert_virtual_media("http://10.10.0.5:8080/iso/rocky-9.iso")
+
+    @responses.activate
+    def test_newer_schema_with_virtual_media_under_the_system(self):
+        """Newer Redfish moved VirtualMedia to the ComputerSystem; follow the link."""
+        system_vm = f"{SYSTEM}/VirtualMedia"
+        responses.add(responses.GET, f"{BASE}/redfish/v1/Managers",
+                      json={"Members": [{"@odata.id": MANAGER}]})
+        responses.add(responses.GET, f"{BASE}{MANAGER}",
+                      json={"@odata.id": MANAGER, "VirtualMedia": {"@odata.id": system_vm}})
+        responses.add(responses.GET, f"{BASE}{system_vm}",
+                      json={"Members": [{"@odata.id": f"{system_vm}/Cd"}]})
+        cd = {"@odata.id": f"{system_vm}/Cd", "MediaTypes": ["CD"], "Inserted": False,
+              "Actions": {"#VirtualMedia.InsertMedia": {
+                  "target": f"{system_vm}/Cd/Actions/VirtualMedia.InsertMedia"}}}
+        responses.add(responses.GET, f"{BASE}{system_vm}/Cd", json=cd)
+        responses.add(responses.POST,
+                      f"{BASE}{system_vm}/Cd/Actions/VirtualMedia.InsertMedia", status=204)
+        responses.add(responses.GET, f"{BASE}{system_vm}/Cd", json={**cd, "Inserted": True})
+
+        driver().insert_virtual_media("http://10.0.0.5:8080/os/rocky-9.iso")
+        assert any("VirtualMedia.InsertMedia" in c.request.url for c in responses.calls)
 
     @responses.activate
     def test_no_cd_slot_is_an_error(self):

@@ -12,6 +12,7 @@ from sqlalchemy import text
 from app.api import (
     admin,
     admin_accounts,
+    admin_bmc,
     auth,
     boot,
     console,
@@ -54,6 +55,7 @@ app.include_router(os_templates.router)
 app.include_router(console.router)
 app.include_router(admin.router)
 app.include_router(admin_accounts.router)
+app.include_router(admin_bmc.router)
 app.include_router(boot.router)
 
 

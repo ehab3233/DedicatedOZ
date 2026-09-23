@@ -17,6 +17,7 @@ from app.schemas import (
     IPAssignmentOut,
     JobOut,
     PowerRequest,
+    PowerStateOut,
     RDNSUpdate,
     ReinstallRequest,
     RescueRequest,
@@ -24,8 +25,8 @@ from app.schemas import (
     ServerHealthOut,
     ServerOut,
 )
+from app.services import bmc_status, provisioning
 from app.services import jobs as job_service
-from app.services import provisioning
 from app.services.audit import record_audit
 from app.services.bandwidth import series_for_server
 from app.services.dispatch import enqueue
@@ -35,6 +36,7 @@ router = APIRouter(prefix="/api/v1/servers", tags=["servers"])
 _POWER_JOB_TYPES = {
     "on": JobType.POWER_ON,
     "off": JobType.POWER_OFF,
+    "force_off": JobType.POWER_FORCE_OFF,
     "cycle": JobType.POWER_CYCLE,
     "reset": JobType.POWER_RESET,
 }
@@ -124,6 +126,8 @@ def power_action(
         raise HTTPException(
             status_code=409, detail="server is suspended; contact support"
         )
+    if payload.force and not customer.is_admin:
+        raise HTTPException(status_code=403, detail="only staff can override a running job")
 
     job = _queue(
         db,
@@ -131,10 +135,22 @@ def power_action(
         customer,
         server,
         _POWER_JOB_TYPES[payload.action],
-        payload={"action": payload.action},
-        audit_action=f"server.power.{payload.action}",
+        payload={"action": payload.action, "forced": payload.force},
+        audit_action=f"server.power.{payload.action}" + (".forced" if payload.force else ""),
+        allow_concurrent=payload.force,
     )
+    bmc_status.forget(server.id)
     return JobOut.model_validate(job)
+
+
+@router.get("/{server_id}/power", response_model=PowerStateOut)
+def power_state(
+    fresh: bool = Query(default=False),
+    server: Server = Depends(get_owned_server),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Power state read from the BMC now (cached for a few seconds)."""
+    return bmc_status.read_power(db, server, fresh=fresh)
 
 
 # ---------------------------------------------------------------------------
@@ -300,6 +316,7 @@ def _queue(
     *,
     payload: dict,
     audit_action: str,
+    allow_concurrent: bool = False,
 ):
     try:
         job, _ = job_service.create_job(
@@ -309,6 +326,7 @@ def _queue(
             payload=payload,
             requested_by_id=customer.id,
             requested_by_type=ActorType.ADMIN if customer.is_admin else ActorType.CUSTOMER,
+            allow_concurrent=allow_concurrent,
         )
     except job_service.JobConflict as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc

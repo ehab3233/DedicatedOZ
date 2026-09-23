@@ -66,16 +66,87 @@ itself.
 Fixed in the first build; noting it here because the same class of bug —
 trusting the delivery mechanism over the database — is the one to watch for.
 
+## Second pass: power, consoles, and running as a service — fixed
+
+This round tested against real protocol implementations instead of mocks:
+OpenIPMI's `ipmi_sim` (a genuine IPMI-over-LAN / RMCP+ stack, driven by the
+real ipmitool 1.8.19), OpenStack's `sushy-emulator` (a Redfish service), a
+live API with real Celery workers, a browser, and the installer on a fresh
+Ubuntu 24.04 with systemd as PID 1. Every item below was found that way; none
+of them showed up against the mocks.
+
+**BMC HTTP traffic obeyed the environment.** `requests` lets
+`REQUESTS_CA_BUNDLE` silently override `verify=False`, so every Redfish call
+to the CIMC's self-signed certificate failed on any host with that variable
+set, and any `HTTPS_PROXY` would have received the BMC traffic. BMC sessions
+now ignore the environment entirely.
+
+**Every ipmitool call could cost ten seconds.** ipmitool 1.8.19 probes for
+the best cipher suite before each command; a BMC that does not answer the
+probe costs ten seconds a call (measured: 10.09 s against 0.05 s). Beyond
+slowness, that put installs at risk: IPMI boot flags expire sixty seconds
+after they are set. Cipher suite 3 is now pinned.
+
+**A dead BMC cost twenty seconds per attempt.** ipmitool's default
+retransmits. Interactive reads now use one retransmit and fail in two seconds.
+
+**Power went Redfish-first.** A power-state read over Redfish on a CIMC is a
+login, one or two GETs and a logout, and each counts against the CIMC's small
+session limit. Over IPMI it is ~60 ms. Power, boot device and live state now
+go over IPMI first and fall back to Redfish; inventory and virtual media stay
+on Redfish.
+
+**Shut down reported success when it had not happened.** If the OS ignored
+ACPI, the job still "succeeded". It now fails, saying the OS ignored the
+request and pointing at Force off — which did not exist, and now does.
+A reset of a powered-off server was a silent no-op; it now powers the server
+on.
+
+**Power could queue behind reinstalls.** One Celery pool served every queue,
+and each reinstall holds a slot for up to 45 minutes; four reinstalls and the
+power buttons stopped working. There is now a worker per queue.
+
+**The serial console.**
+- It authenticated with the session JWT in the websocket URL, which nginx
+  writes to its access log. It now uses a one-minute, single-use ticket.
+- It ran ipmitool on pipes; ipmitool wants a terminal. It now runs on a pty,
+  which is also what BIOS screens with cursor addressing need.
+- The "idle timeout" was a hard 15-minute cap regardless of activity. It is
+  now a real idle timeout (30 min) plus an 8-hour ceiling.
+- It held a pooled database connection for the whole session.
+- The browser rendered raw text, so BIOS output was garbage. It is now
+  xterm.js.
+- A double-clicked Reconnect (or React's development double-mount) opened two
+  SOL sessions: one held the BMC's only slot, the other got the keystrokes.
+
+**Redfish details.** Virtual media was looked up at a hard-coded path;
+newer schemas moved it, and it now follows the links the BMC publishes.
+Clearing a boot override with `Enabled: Disabled` alone is rejected by
+stricter implementations; the target is now sent too.
+
+**The installer.** It needed `sudo` (absent from minimal images); installed
+the full `dnsmasq` package, whose own service fights systemd-resolved for
+port 53 and can register itself as the host's resolver; bound dnsmasq with
+`bind-interfaces`, which fails if the NIC comes up after it at boot; and
+validated a dnsmasq config file that dnsmasq was never going to read. Now:
+`runuser`, `dnsmasq-base` under our own `doz-pxe` unit, `bind-dynamic`, and
+validation of the file actually used. The whole platform is one service,
+`doz`, with every part `PartOf` it.
+
+**Schema upgrades.** `create_all` never adds columns to an existing table, so
+an install from an earlier version would have broken on the first new column.
+An additive upgrade runs on every install and update.
+
 ## Cannot be verified without the hardware
 
 These are why the bench test exists. Run it on one server before anything
 else.
 
-1. **Does the M4 honour `BootSourceOverrideEnabled=Once` + `Pxe` over
-   Redfish?** The driver reads the override back and refuses to continue if
-   it did not stick, so a silent failure becomes a loud one — but whether it
-   works at all on your firmware build is unknown until you try. If it does
-   not, vMedia becomes the install path and the ramdisk is booted as an ISO.
+1. **Does the M4 honour a one-time PXE boot override?** Now set over IPMI
+   first (`chassis bootdev pxe`), Redfish second. Both paths read the
+   override back and refuse to continue if it did not stick, so a silent
+   failure becomes a loud one — but whether it works on your firmware build
+   is unknown until you try. If neither does, vMedia becomes the install path.
 
 2. **Does virtual media insert over plain HTTP from the CIMC?** Known to be
    fussy: no redirects, no HTTPS with an unknown CA, and older builds lack
@@ -95,16 +166,27 @@ else.
    chainload the distro kernel directly from iPXE, with the ramdisk stage
    done as a separate rescue-style job first.
 
-6. **Serial console.** Needs BIOS console redirection on COM0 at 115200, and
-   IPMI over LAN enabled in the CIMC. Both are BIOS/CIMC settings, not
-   software.
+6. **Serial console.** Needs IPMI over LAN and SOL enabled on the CIMC, and
+   BIOS console redirection on COM0 at 115200. **Prepare BMC** sets all three
+   over the CIMC XML API using the object names Cisco's own SDK uses, then
+   proves IPMI and SOL work. The XML API calls are tested against recorded
+   request shapes, not a real CIMC: if one is rejected, the job log shows the
+   CIMC's error and the web UI can do the same by hand.
+
+7. **The HTML5 KVM viewer's URL.** The one-time token call
+   (`aaaGetComputeAuthTokens`) is documented; the path of the HTML5 viewer
+   has moved between CIMC releases. The panel probes the known paths and
+   falls back to the Java launcher and the CIMC web UI, and
+   `DOZ_KVM_URL_TEMPLATE` pins it once the bench test shows which one yours
+   uses.
 
 ## Known limits that are design choices, not bugs
 
-- **One worker slot per install for its whole duration.** The worker waits on
-  the installer callback for up to 45 minutes. Four concurrent installs per
-  worker process. Raise `--concurrency` or run more workers as the fleet grows;
-  a proper fix would move the wait into a scheduled poll.
+- **One provisioning worker slot per install for its whole duration.** The
+  worker waits on the installer callback for up to 45 minutes; eight
+  concurrent installs by default. Power, console and polling have their own
+  workers, so this no longer blocks anything else. A proper fix would move
+  the wait into a scheduled poll.
 - **Suspend does not touch the switch.** Documented in three places. Needs
   a switch model.
 - **No bandwidth poller.** Same reason.

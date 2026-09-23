@@ -3,20 +3,27 @@
 #
 # One entry point for the three ways this runs:
 #
+#   systemd  the management server: the `doz` service, installed by
+#            `sudo ./doz.sh install ...` (deploy/install-management-server.sh)
 #   dev      local processes against a local Postgres/Redis, logs in .run/
 #   compose  docker compose, everything in containers
-#   systemd  a management server installed by deploy/install-management-server.sh
 #
-# The mode is detected: an /etc/doz/doz.env means systemd, a running
+# The mode is detected: an installed doz.service means systemd, a running
 # docker compose project means compose, otherwise dev. Override with
 # DOZ_MODE=dev|compose|systemd.
 #
-#   ./doz.sh up            start everything (initialising the database first)
+#   sudo ./doz.sh install --ip IP (--dhcp-range A,B | --proxy-dhcp | --no-pxe)
+#                          install as the `doz` Ubuntu service (see deploy/)
+#   sudo ./doz.sh update   re-run the installer with the saved settings
+#   ./doz.sh up            start everything (systemd: systemctl start doz)
 #   ./doz.sh down          stop everything
 #   ./doz.sh restart       stop, start
-#   ./doz.sh status        what is running
-#   ./doz.sh logs [svc]    tail logs (api | worker | beat | frontend | all)
-#   ./doz.sh init          create the schema, seed templates, create the admin
+#   ./doz.sh status        every part, plus which job queues have a worker
+#   ./doz.sh logs [part]   follow logs (api | power | provision | poll | beat | pxe | all)
+#   ./doz.sh sim start|stop|status
+#                          a simulated BMC on this machine, registered as SIM-0001,
+#                          for trying power and the serial console without hardware
+#   ./doz.sh init          create/upgrade the schema, seed templates, create the admin
 #   ./doz.sh reset-admin EMAIL    set a new password on an admin account
 #   ./doz.sh test          run the backend tests
 #   ./doz.sh lint          ruff + tsc
@@ -43,7 +50,7 @@ die()  { printf '\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 
 detect_mode() {
     if [ -n "${DOZ_MODE:-}" ]; then echo "$DOZ_MODE"; return; fi
-    if [ -f /etc/doz/doz.env ] && systemctl list-unit-files doz-api.service >/dev/null 2>&1; then
+    if [ -f /etc/systemd/system/doz.service ]; then
         echo systemd; return
     fi
     if command -v docker >/dev/null 2>&1 \
@@ -161,7 +168,10 @@ dev_up() {
 
     say "starting services"
     dev_start_one api      "$BACKEND"  "$VENV/bin/uvicorn" app.main:app --host 0.0.0.0 --port 8000 --reload
-    dev_start_one worker   "$BACKEND"  "$VENV/bin/celery" -A "$CELERY_APP" worker --loglevel=info -Q provision,power,poll --concurrency=4
+    # Power and polling on one worker, provisioning on another: a reinstall
+    # holds its worker slot for twenty minutes, and must not hold the power button.
+    dev_start_one worker   "$BACKEND"  "$VENV/bin/celery" -A "$CELERY_APP" worker -n power@%h --loglevel=info -Q power,poll --concurrency=4
+    dev_start_one provision "$BACKEND" "$VENV/bin/celery" -A "$CELERY_APP" worker -n provision@%h --loglevel=info -Q provision --concurrency=4
     dev_start_one beat     "$BACKEND"  "$VENV/bin/celery" -A "$CELERY_APP" beat --loglevel=info
     dev_start_one frontend "$FRONTEND" npm run dev -- --host 0.0.0.0
 
@@ -196,7 +206,7 @@ dev_down() {
 
 dev_status() {
     [ -d "$RUN_DIR" ] || { echo "nothing running"; return; }
-    for name in api worker beat frontend; do
+    for name in api worker provision beat frontend; do
         pidfile="$RUN_DIR/$name.pid"
         if [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then
             printf '  %-10s running (pid %s)\n' "$name" "$(cat "$pidfile")"
@@ -241,24 +251,46 @@ compose_up() {
 # systemd mode
 # ---------------------------------------------------------------------------
 
-SYSTEMD_UNITS="doz-api doz-worker doz-beat"
+SYSTEMD_PARTS="doz-api doz-worker-power doz-worker-provision doz-worker-poll doz-beat doz-pxe"
 
-sd_up()      { sudo systemctl start $SYSTEMD_UNITS nginx dnsmasq; sd_status; }
-sd_down()    { sudo systemctl stop $SYSTEMD_UNITS; }
-sd_restart() { sudo systemctl restart $SYSTEMD_UNITS; sd_status; }
-sd_status()  { systemctl --no-pager --lines=0 status $SYSTEMD_UNITS nginx dnsmasq 2>&1 | grep -E "●|Active:"; curl -fsS http://localhost/health && echo; }
+need_root() { [ "$(id -u)" -eq 0 ] || die "run with sudo"; }
+
+sd_up()      { sudo systemctl start doz; sd_status; }
+sd_down()    { sudo systemctl stop doz; }
+sd_restart() { sudo systemctl restart doz; sleep 2; sd_status; }
+sd_status() {
+    printf '  %-22s %s\n' "doz (umbrella)" "$(systemctl is-active doz 2>/dev/null)"
+    for part in $SYSTEMD_PARTS; do
+        [ -f "/etc/systemd/system/$part.service" ] || continue
+        printf '  %-22s %s\n' "$part" "$(systemctl is-active "$part" 2>/dev/null)"
+    done
+    for dep in postgresql redis-server nginx; do
+        printf '  %-22s %s\n' "$dep" "$(systemctl is-active "$dep" 2>/dev/null)"
+    done
+    printf '  %-22s ' "api health"
+    curl -fsS http://127.0.0.1/health 2>/dev/null && echo || echo "unreachable"
+    printf '  %-22s ' "workers answering"
+    sd_celery inspect ping --timeout 3 2>/dev/null | grep -c pong || true
+}
 sd_logs() {
-    svc="${1:-all}"
-    case "$svc" in
-        all)      sudo journalctl -f -u doz-api -u doz-worker -u doz-beat ;;
-        api|worker|beat) sudo journalctl -f -u "doz-$svc" ;;
-        *)        sudo journalctl -f -u "$svc" ;;
+    part="${1:-all}"
+    case "$part" in
+        all)       sudo journalctl -f -u 'doz*' ;;
+        api|beat|pxe) sudo journalctl -f -u "doz-$part" ;;
+        power|provision|poll) sudo journalctl -f -u "doz-worker-$part" ;;
+        *)         sudo journalctl -f -u "$part" ;;
     esac
+}
+as_doz_user() {
+    if [ "$(id -u)" -eq 0 ]; then runuser -u doz -- "$@"; else sudo -u doz "$@"; fi
+}
+sd_celery() {
+    as_doz_user bash -c 'set -a; . /etc/doz/doz.env; set +a; cd /opt/doz/backend && exec .venv/bin/celery -A app.workers.celery_app.celery_app "$@"' _ "$@"
 }
 sd_python() {
     # Run python as the doz user with the production environment. Arguments
     # are passed through; a script may also be fed on stdin with `-`.
-    sudo -u doz bash -c 'set -a; . /etc/doz/doz.env; set +a; cd /opt/doz/backend && exec .venv/bin/python "$@"' _ "$@"
+    as_doz_user bash -c 'set -a; . /etc/doz/doz.env; set +a; cd /opt/doz/backend && exec .venv/bin/python "$@"' _ "$@"
 }
 
 # ---------------------------------------------------------------------------
@@ -326,6 +358,68 @@ cmd_bench() {
     (cd "$BACKEND" && "$PY" -m scripts.bench_validate --host "$host" "$@")
 }
 
+cmd_sim() {
+    action="${1:-status}"; shift || true
+    case "$MODE" in
+        systemd)
+            need_root
+            state=/var/lib/doz/sim
+            user_name=admin
+            password="$(cat "$state/.password" 2>/dev/null || python3 -c 'import secrets; print(secrets.token_urlsafe(12))')"
+            # The installed copy: the doz user cannot read a checkout in
+            # someone's home directory (750 on current Ubuntu).
+            run() { runuser -u doz -- env DOZ_SIM_STATE="$state" /opt/doz/deploy/sim/run-sim.sh "$@"; }
+            register() { sd_python -m scripts.sim_server --user "$user_name" --password "$password" "$@"; }
+            ;;
+        *)
+            ensure_venv; load_env
+            state="$ROOT/.run/sim"
+            # The env secrets backend cannot be written to, so the simulator
+            # takes the fleet default credential instead.
+            user_name="${DOZ_CIMC_DEFAULT_USER:-admin}"
+            password="${DOZ_CIMC_DEFAULT_PASS:-sim-password}"
+            run() { DOZ_SIM_STATE="$state" "$ROOT/deploy/sim/run-sim.sh" "$@"; }
+            register() { (cd "$BACKEND" && "$PY" -m scripts.sim_server --user "$user_name" --password "$password" "$@"); }
+            ;;
+    esac
+    case "$action" in
+        start)
+            command -v ipmi_sim >/dev/null || die "ipmi_sim is not installed: sudo apt install --no-install-recommends openipmi"
+            # The openipmi package also installs openipmi.service, which loads
+            # drivers for *this machine's own* BMC. A VM has none, so it fails
+            # on every boot and marks the system degraded. The simulator does
+            # not use it.
+            if [ "$(id -u)" -eq 0 ] && systemctl is-enabled --quiet openipmi.service 2>/dev/null; then
+                systemctl disable --now openipmi.service >/dev/null 2>&1 || true
+                systemctl reset-failed openipmi.service >/dev/null 2>&1 || true
+                echo "disabled openipmi.service (local BMC drivers; not needed by the simulator)"
+            fi
+            mkdir -p "$state"
+            [ "$MODE" = systemd ] && { chown doz:doz "$state"; printf '%s' "$password" > "$state/.password"; chown doz:doz "$state/.password"; chmod 600 "$state/.password"; }
+            run start --user "$user_name" --password "$password"
+            register
+            echo
+            echo "Open the panel: Manage -> Fleet -> SIM-0001. Power buttons and the serial"
+            echo "console drive the simulator exactly as they would a CIMC over IPMI."
+            ;;
+        stop)   run stop ;;
+        status) run status ;;
+        remove) run stop; register --remove ;;
+        *) die "usage: ./doz.sh sim start|stop|status|remove" ;;
+    esac
+}
+
+cmd_install() {
+    need_root
+    exec "$ROOT/deploy/install-management-server.sh" --src "$ROOT" "$@"
+}
+
+cmd_update() {
+    need_root
+    [ -f /etc/doz/install.conf ] || die "not installed yet: use ./doz.sh install first"
+    exec "$ROOT/deploy/install-management-server.sh" --src "$ROOT" "$@"
+}
+
 cmd_assets()  { exec "$ROOT/deploy/fetch-os-images.sh" "$@"; }
 cmd_ramdisk() { exec "$ROOT/installer/build-ramdisk.sh" --out "$ROOT/installer/assets/doz-installer" "$@"; }
 
@@ -346,6 +440,9 @@ case "$cmd" in
         case "$MODE" in dev) dev_status ;; compose) compose ps ;; systemd) sd_status ;; esac ;;
     logs)
         case "$MODE" in dev) dev_logs "$@" ;; compose) compose logs -f "$@" ;; systemd) sd_logs "$@" ;; esac ;;
+    install)      cmd_install "$@" ;;
+    update)       cmd_update "$@" ;;
+    sim)          cmd_sim "$@" ;;
     init)         cmd_init "$@" ;;
     reset-admin)  cmd_reset_admin "$@" ;;
     test)         cmd_test "$@" ;;
@@ -355,7 +452,7 @@ case "$cmd" in
     assets)       cmd_assets "$@" ;;
     ramdisk)      cmd_ramdisk "$@" ;;
     help|-h|--help)
-        sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//' ;;
+        sed -n '2,35p' "$0" | sed 's/^# \{0,1\}//' ;;
     *)
         die "unknown command: $cmd (try ./doz.sh help)" ;;
 esac
