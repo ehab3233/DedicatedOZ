@@ -166,7 +166,19 @@ network would require.
 **The simulator.** OpenIPMI's `ipmi_sim` drops sensor records added after a
 sensor's event support is configured, and leaves every sensor's scanning
 off on a clean start; both are worked around in the generated config and
-the run script, so `sdr elist` returns readings from the first start.
+the run script, so `sdr elist` returns readings from the first start. The
+2.0.37 release that Ubuntu 26.04 ships only marks a sensor readable through
+its file-polling path, so values set in the config never show there; the
+sensors now poll their values from files in the state directory, which
+works on both releases and doubles as a way to simulate a fault.
+
+**Ubuntu 26.04.** The installer refused anything but 22.04 and 24.04. It now
+accepts 26.04 and newer (older than 22.04 is still refused), and was run on
+26.04 end to end: Python 3.14 with every dependency from a wheel,
+PostgreSQL 18, Redis 8, the smoke test green. Where a release has dropped
+Redis for Valkey, the installer uses that instead. A one-line installer,
+`install.sh`, now fetches the code, installs, starts the simulator and
+prints the login.
 
 What was added, and how it was verified:
 

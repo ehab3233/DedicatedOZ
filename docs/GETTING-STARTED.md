@@ -116,11 +116,23 @@ sudo /opt/doz/doz.sh sim start
 ```
 
 That starts OpenIPMI's `ipmi_sim` -- a real IPMI-over-LAN implementation --
-with a pretend server behind it, and registers it as **SIM-0001**. Open it in
-the panel: Power on / Shut down / Force off / Reset / Power cycle work, and
-**Open serial console** shows a POST screen and a login prompt when you reset
-it. `sudo /opt/doz/deploy/smoke-test.sh` runs the whole check automatically.
-Remove it with `sudo /opt/doz/doz.sh sim remove`.
+with a pretend server behind it, and registers it as **SIM-0001**. (The
+one-line installer already did this.) Open it in the panel: every power
+button works, the **Console** tab shows a POST screen and a login prompt
+when you reset it, **Sensors** shows twelve readings, and the **BMC** tab's
+tools all answer. `sudo /opt/doz/doz.sh sim events` puts a few entries in
+its event log. `sudo /opt/doz/deploy/smoke-test.sh` runs the whole check
+automatically. Remove it with `sudo /opt/doz/doz.sh sim remove`.
+
+The simulator's readings come from files under `/var/lib/doz/sim/sensors/`,
+one per sensor, in the sensor's own unit. Write a number into one to watch
+the panel react:
+
+```sh
+echo 96 | sudo tee /var/lib/doz/sim/sensors/30    # CPU1 Temp to 96 C: critical within a second
+echo 0  | sudo tee /var/lib/doz/sim/sensors/40    # FAN1 stops
+echo 47 | sudo tee /var/lib/doz/sim/sensors/30    # back to normal
+```
 
 Then fetch the OS images and build the installer ramdisk. These take a while
 and a couple of gigabytes, which is why they are separate:
