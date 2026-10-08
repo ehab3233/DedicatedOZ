@@ -181,9 +181,10 @@ IPMI_PASSWORD='the-password' ipmitool -I lanplus -H 10.0.0.101 -U admin -E -C 3 
 
 The Redfish call should return JSON. The IPMI one may fail at this point:
 IPMI over LAN and Serial-over-LAN are **off by default** on many CIMC builds.
-You do not need to fix that by hand -- step 5's **Prepare BMC** switches both
-on. (If you would rather: CIMC web UI → Admin → Communication Services → IPMI
-over LAN, and Server → Remote Presence → Serial over LAN, 115200.)
+You do not need to fix that by hand -- **Prepare BMC** runs when you add the
+server in step 5 and switches both on, with the rest of what the platform
+needs. (If you would rather: CIMC web UI → Admin → Communication Services →
+IPMI over LAN, and Server → Remote Presence → Serial over LAN, 115200.)
 
 `-C 3` pins the IPMI cipher suite. Without it, ipmitool 1.8.19 probes for the
 best one on every call, and a BMC that does not answer the probe costs ten
@@ -236,22 +237,31 @@ Portal → **Manage** → **Add server**.
   queue and remote hands will need at 3am.
 - Leave the PXE MAC blank.
 
-On save, an **inventory sync** job runs. Open the server (click its serial)
-and watch it: within a minute the CPU, RAM, firmware, drives and NICs appear,
-and one MAC is marked **PXE**. If more than one NIC came back, pick the one you
-cabled with **Use for PXE**.
+On save, a **Prepare BMC** job runs (a tickbox on the form; leave it on).
+Over the CIMC's XML API it switches on IPMI over LAN, Serial-over-LAN at
+115200 on COM0, BIOS console redirection to the same port, virtual media,
+KVM and Redfish, enables the PXE option ROMs on the LAN ports, sets the boot
+order (disk first, PXE available, legacy mode) and, if `DOZ_NTP_SERVERS` is
+set, NTP. BIOS changes take effect at the next boot. It then proves IPMI
+works by reading the power state, reads back the SOL settings, and queues
+the **inventory sync**. The job log shows each step and the CIMC's reply;
+anything this firmware rejects is listed at the end, and those few you set
+in the CIMC web UI by hand. If the job fails, the message says which of the
+usual three it is: wrong password, IPMI still off, or UDP 623 blocked
+between the VM and the CIMC.
 
-Then click **Prepare BMC**. Over the CIMC's XML API it switches on IPMI over
-LAN, switches on Serial-over-LAN at 115200 on COM0, and points the BIOS
-console redirection at the same port (that last one takes effect at the next
-boot). It then proves IPMI works by reading the power state, and reads back
-the SOL settings. The job log shows each step. If the job fails, the message
-says which of the usual three it is: wrong password, IPMI still off, or UDP
-623 blocked between the VM and the CIMC.
+This is a one-time job: the settings live in the CIMC. The BMC tab shows when
+it last ran, and a re-run reads each setting first and only writes the ones
+that have drifted, so on a prepared server it changes nothing. Expect the
+panel to lose the server for a few seconds the first time: switching IPMI
+over LAN on restarts the CIMC's IPMI service.
 
-If the sync fails, the job's raw log shows exactly which Redfish call the CIMC
-refused and what it said. The usual causes: wrong password, IPMI/Redfish not
-enabled, or the VM cannot reach the CIMC IP.
+Then open the server (click its serial) and watch the sync: within a minute
+the CPU, RAM, firmware, drives and NICs appear, and one MAC is marked
+**PXE**. If more than one NIC came back, pick the one you cabled with **Use
+for PXE**. If the sync fails, the job's raw log shows exactly which Redfish
+call the CIMC refused and what it said. The usual causes: wrong password,
+Redfish not enabled, or the VM cannot reach the CIMC IP.
 
 ## 6. Give it an address
 
@@ -329,8 +339,9 @@ restart, so "then reset now" is the default.
 
 **BMC tab.** What the controller says about itself (firmware, IPMI version,
 its own network settings, faults, the power-restore policy, which you can
-change), and the tools: **Prepare BMC**, the locator LED (blink it for a
-minute so remote hands find the box), **Reset BMC** for a CIMC that has
+change), and the tools: **Prepare BMC** (run for you when the server was
+added; the tab shows when), the locator LED (blink it for a minute so remote
+hands find the box), **Reset BMC** for a CIMC that has
 stopped answering (the host keeps running), and **Rotate** for the IPMI
 password. Rotation sets a new 16-character password on the BMC for the user
 the platform logs in as, proves a fresh session works with it, then stores

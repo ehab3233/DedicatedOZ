@@ -165,7 +165,8 @@ def launch_kvm(
         target_type="server",
         target_id=str(server_id),
         source_ip=client_ip(request),
-        detail={"html5_found": bool(links["html5"])},
+        detail={"html5_found": bool(links["html5"]),
+                "tokens_unsupported": bool(links.get("tokens_unsupported"))},
     )
     db.commit()
     return {**links, "firmware": firmware}

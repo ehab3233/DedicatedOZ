@@ -133,7 +133,8 @@ export default function Bmc() {
             <div className="spread">
               <div>
                 <div className="strong">Prepare BMC</div>
-                <div className="subtle small">Switch on IPMI over LAN and Serial-over-LAN, point BIOS console redirection at it, then prove both work.</div>
+                <div className="subtle small">One click sets everything the platform needs in the CIMC: IPMI over LAN, Serial-over-LAN, BIOS console redirection, virtual media, KVM, Redfish, PXE on the LAN ports, the boot order (disk first, PXE available) and NTP. Then it proves IPMI and SOL work. Anything the firmware rejects is listed in the job log; the CIMC's own network settings are never touched. It runs when a server is added; re-running it only writes settings that have drifted.</div>
+                <div className="small" style={{ marginTop: 4 }}>{s.bmc_prepared_at ? <span className="subtle">Last run {relativeTime(s.bmc_prepared_at, now)}</span> : <span className="pill warning">never run</span>}</div>
               </div>
               <button disabled={Boolean(activeJob) || busy === 'prepare'} onClick={prepare}>{busy === 'prepare' ? <Spinner /> : <Wrench />}Prepare BMC</button>
             </div>

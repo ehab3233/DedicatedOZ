@@ -309,6 +309,10 @@ DOZ_CORS_ORIGINS=http://${MGMT_IP}
 DOZ_INSTALLER_TEMPLATE_DIR=${INSTALL_DIR}/installer/templates
 # ISO image store, served to BMCs at http://${MGMT_IP}:8080/iso/
 DOZ_IMAGE_DIR=${INSTALL_DIR}/installer/assets/iso
+# Prepare BMC: persistent boot order it sets (disk,pxe | pxe,disk | empty = leave)
+# and NTP servers it points each CIMC at (comma-separated; empty = leave).
+DOZ_BMC_PREPARE_BOOT_ORDER=disk,pxe
+DOZ_NTP_SERVERS=
 DOZ_IPMITOOL_PATH=/usr/bin/ipmitool
 DOZ_SOL_IDLE_TIMEOUT_SECONDS=1800
 # vKVM: empty probes the CIMC for its HTML5 viewer. Placeholders {host} {tkn1} {tkn2}.

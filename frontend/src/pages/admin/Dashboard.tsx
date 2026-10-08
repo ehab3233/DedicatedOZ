@@ -1,4 +1,4 @@
-import { AlertTriangle, Cpu, HardDrive, Server, XCircle } from 'lucide-react'
+import { AlertTriangle, Cpu, HardDrive, Server, Wrench, XCircle } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { api, type AdminServer, type Job } from '../../api'
 import { Card, Empty, PageHeader, Pill, Stat, formatTime, label, relativeTime, useNow } from '../../components'
@@ -126,6 +126,9 @@ function buildAttention(servers: AdminServer[], jobs: Job[]) {
     }
     if (s.cimc_firmware && s.cimc_firmware !== TARGET_FIRMWARE) {
       items.push({ icon: <Cpu style={{ color: 'var(--text-3)' }} />, text: `${s.serial}: CIMC ${s.cimc_firmware}, not the ${TARGET_FIRMWARE} baseline`, to: `/admin/servers/${s.id}/bmc`, link: 'BMC' })
+    }
+    if (!s.bmc_prepared_at && s.state !== 'retired') {
+      items.push({ icon: <Wrench style={{ color: 'var(--warn)' }} />, text: `${s.serial}: BMC never prepared, so IPMI over LAN, SOL and KVM may still be off`, to: `/admin/servers/${s.id}/bmc`, link: 'Prepare' })
     }
     const drives = (s.drives as Array<Record<string, unknown>>).filter((d) => d.failure_predicted)
     if (drives.length) {

@@ -472,6 +472,52 @@ class TestAdminGuards:
         )
         assert response.status_code == 409
 
+    def test_adding_a_server_prepares_its_bmc_then_syncs_inventory(
+        self, client, db, make_customer, auth_header, monkeypatch, dispatched
+    ):
+        from sqlalchemy import select
+
+        from app.models import Job
+        from app.secrets import BMCCredential
+
+        admin = make_customer("admin@example.com", admin=True)
+
+        class Resolves:
+            def get_bmc_credential(self, ref):  # noqa: ANN001
+                return BMCCredential("admin", "password")
+
+        monkeypatch.setattr("app.api.admin.get_secrets_backend", lambda: Resolves())
+
+        def jobs_for(server_id: str) -> list[Job]:
+            return list(db.execute(
+                select(Job).where(Job.server_id == server_id).order_by(Job.created_at)
+            ).scalars())
+
+        # Default: one Prepare BMC job, which queues the inventory sync itself
+        # once the CIMC's services are on.
+        created = client.post(
+            "/api/v1/admin/servers",
+            json={"serial": "FCH1111", "cimc_ip": "10.10.50.11",
+                  "cimc_credential_ref": "cimc/FCH1111"},
+            headers=auth_header(admin),
+        )
+        assert created.status_code == 201, created.text
+        assert created.json()["bmc_prepared_at"] is None
+        jobs = jobs_for(created.json()["id"])
+        assert [j.type for j in jobs] == ["bmc_setup"]
+        assert jobs[0].payload == {"inventory_after": True}
+        assert dispatched == [str(jobs[0].id)]
+
+        # Opted out: straight to the inventory sync, as before.
+        created = client.post(
+            "/api/v1/admin/servers",
+            json={"serial": "FCH2222", "cimc_ip": "10.10.50.12",
+                  "cimc_credential_ref": "cimc/FCH2222", "prepare_bmc": False},
+            headers=auth_header(admin),
+        )
+        assert created.status_code == 201, created.text
+        assert [j.type for j in jobs_for(created.json()["id"])] == ["inventory_sync"]
+
     def test_registering_a_server_validates_the_credential_ref(
         self, client, make_customer, auth_header, monkeypatch
     ):

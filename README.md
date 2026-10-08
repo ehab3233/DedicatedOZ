@@ -32,7 +32,7 @@ gateways, and none of it is a differentiator.
 | Wipe | ATA secure erase / `nvme format` / `sg_format`, gated so an unwiped server cannot return to stock |
 | Console | Serial-over-LAN in the browser (xterm.js over a websocket), embedded in the server page or full-page, with take-over when someone else holds the port |
 | vKVM | One click asks the CIMC for launch tokens and opens its HTML5 viewer: video, keyboard and mouse passthrough, its own virtual media. Java launcher on older firmware |
-| BMC setup | **Prepare BMC** turns on IPMI over LAN, SOL and BIOS console redirection through the CIMC XML API |
+| BMC setup | **Prepare BMC** runs when a server is added: IPMI over LAN, SOL, BIOS console redirection, virtual media, KVM, Redfish, PXE option ROMs, boot order and NTP over the CIMC XML API. Reads each setting first, so a re-run changes nothing |
 | IPAM | Blocks, assignments, free-pool view, customer-editable rDNS |
 | Health | PSU, fan, temperature and drive pre-fail, polled every 15 minutes |
 | Portal | Servers, power, reinstall, rescue, jobs, bandwidth, SSH keys, console |

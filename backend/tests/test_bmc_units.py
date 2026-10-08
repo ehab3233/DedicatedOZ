@@ -58,32 +58,40 @@ class TestCimcXmlApi:
         _login_ok(responses)
         responses.add(
             responses.POST, NUOVA,
+            body='<configResolveDn dn="sys/rack-unit-1/sol-if" cookie="x" response="yes">'
+                 '<outConfig><solIf dn="sys/rack-unit-1/sol-if" adminState="disable" '
+                 'speed="9600" comport="com0"/></outConfig></configResolveDn>',
+        )
+        responses.add(
+            responses.POST, NUOVA,
             body='<configConfMo dn="sys/rack-unit-1/sol-if" cookie="x" response="yes">'
                  '<outConfig><solIf dn="sys/rack-unit-1/sol-if" adminState="enable" '
                  'speed="115200" comport="com0"/></outConfig></configConfMo>',
         )
         _logout_ok(responses)
         with CimcXmlApi(HOST, CRED) as api:
-            out = api.enable_sol()
-        body = responses.calls[1].request.body.decode()
+            changed, out = api.enable_sol()
+        read, body = (responses.calls[i].request.body.decode() for i in (1, 2))
+        assert '<configResolveDn' in read and 'dn="sys/rack-unit-1/sol-if"' in read
         assert '<solIf dn="sys/rack-unit-1/sol-if" adminState="enable"' in body
         assert 'speed="115200"' in body and 'comport="com0"' in body
-        assert out["adminState"] == "enable"
+        assert changed and out["adminState"] == "enable"
 
     @responses.activate
     def test_ipmi_over_lan_and_console_redirection_objects(self):
         _login_ok(responses)
-        for _ in range(2):
+        # An empty read (the CIMC has nothing at the DN) means write.
+        for _ in range(4):
             responses.add(
                 responses.POST, NUOVA,
                 body='<configConfMo response="yes"><outConfig/></configConfMo>',
             )
         _logout_ok(responses)
         with CimcXmlApi(HOST, CRED) as api:
-            api.enable_ipmi_over_lan()
-            api.set_console_redirection()
-        ipmi = responses.calls[1].request.body.decode()
-        bios = responses.calls[2].request.body.decode()
+            assert api.enable_ipmi_over_lan()[0]
+            assert api.set_console_redirection()[0]
+        ipmi = responses.calls[2].request.body.decode()
+        bios = responses.calls[4].request.body.decode()
         assert (
             '<commIpmiLan dn="sys/svc-ext/ipmi-lan-svc" adminState="enabled" priv="admin"'
             in ipmi
@@ -130,6 +138,155 @@ class TestCimcXmlApi:
                         captured.append((request, response))):
             pass
         assert 'p&amp;ss' not in str(captured) and "abc-123" not in str(captured)
+
+
+class TestPrepareObjects:
+    """The XML sent for each Prepare BMC step, against the names Cisco's SDK uses,
+    and the read-before-write that makes a re-run a no-op."""
+
+    def _confmo_ok(self, dn: str, cls: str, **attrs: str) -> None:
+        attributes = " ".join(f'{k}="{v}"' for k, v in attrs.items())
+        responses.add(
+            responses.POST, NUOVA,
+            body=f'<configConfMo dn="{dn}" cookie="x" response="yes"><outConfig>'
+                 f'<{cls} dn="{dn}" {attributes}/></outConfig></configConfMo>',
+        )
+
+    def _resolve_ok(self, dn: str, cls: str, **attrs: str) -> None:
+        attributes = " ".join(f'{k}="{v}"' for k, v in attrs.items())
+        responses.add(
+            responses.POST, NUOVA,
+            body=f'<configResolveDn dn="{dn}" cookie="x" response="yes"><outConfig>'
+                 f'<{cls} dn="{dn}" {attributes}/></outConfig></configResolveDn>',
+        )
+
+    @responses.activate
+    def test_services_vmedia_kvm_redfish_ntp(self):
+        _login_ok(responses)
+        self._resolve_ok("sys/svc-ext/vmedia-svc", "commVMedia", adminState="disabled")
+        self._confmo_ok("sys/svc-ext/vmedia-svc", "commVMedia", adminState="enabled")
+        self._resolve_ok("sys/svc-ext/kvm-svc", "commKvm", adminState="disabled", port="2068")
+        self._confmo_ok("sys/svc-ext/kvm-svc", "commKvm", adminState="enabled")
+        self._resolve_ok("sys/svc-ext/redfish-svc", "commRedfish", adminState="disabled")
+        self._confmo_ok("sys/svc-ext/redfish-svc", "commRedfish", adminState="enabled")
+        self._resolve_ok("sys/svc-ext/ntp-svc", "commNtpProvider", ntpEnable="no")
+        self._confmo_ok("sys/svc-ext/ntp-svc", "commNtpProvider", ntpEnable="yes")
+        _logout_ok(responses)
+        with CimcXmlApi(HOST, CRED) as api:
+            changed, attrs = api.enable_vmedia()
+            assert changed and attrs["adminState"] == "enabled"
+            assert api.enable_kvm()[0]
+            assert api.enable_redfish()[0]
+            assert api.set_ntp(["10.0.0.5", "pool.ntp.org"])[0]
+        bodies = [c.request.body.decode() for c in responses.calls[1:9]]
+        assert '<configResolveDn' in bodies[0] and 'dn="sys/svc-ext/vmedia-svc"' in bodies[0]
+        assert '<commVMedia dn="sys/svc-ext/vmedia-svc" adminState="enabled"' in bodies[1]
+        assert '<commKvm dn="sys/svc-ext/kvm-svc" adminState="enabled" port="2068"' in bodies[3]
+        assert '<commRedfish dn="sys/svc-ext/redfish-svc" adminState="enabled"' in bodies[5]
+        assert 'ntpEnable="yes" ntpServer1="10.0.0.5" ntpServer2="pool.ntp.org"' in bodies[7]
+
+    @responses.activate
+    def test_a_setting_the_cimc_already_has_is_not_rewritten(self):
+        # Rewriting IPMI over LAN restarts the CIMC's IPMI service, which is
+        # what made the panel lose a server after a second Prepare BMC.
+        _login_ok(responses)
+        self._resolve_ok("sys/svc-ext/ipmi-lan-svc", "commIpmiLan",
+                         adminState="enabled", priv="admin", key="0" * 40)
+        _logout_ok(responses)
+        with CimcXmlApi(HOST, CRED) as api:
+            changed, attrs = api.enable_ipmi_over_lan()
+        assert changed is False and attrs["priv"] == "admin"
+        assert len(responses.calls) == 3  # login, read, logout: no configConfMo
+        assert "configConfMo" not in responses.calls[1].request.body.decode()
+
+    @responses.activate
+    def test_comparison_ignores_the_cimcs_capitalisation(self):
+        _login_ok(responses)
+        self._resolve_ok("sys/rack-unit-1/bios/bios-settings/LOMPort-OptionROM",
+                         "biosVfLOMPortOptionROM", vpLOMPortsAllState="enabled")
+        _logout_ok(responses)
+        with CimcXmlApi(HOST, CRED) as api:
+            assert api.enable_lom_pxe()[0] is False
+
+    @responses.activate
+    def test_a_setting_that_cannot_be_read_is_written_anyway(self):
+        _login_ok(responses)
+        responses.add(
+            responses.POST, NUOVA,
+            body='<configResolveDn cookie="x" response="yes" errorCode="170" '
+                 'invocationResult="unidentified-fail" errorDescr="DN does not exist"/>',
+        )
+        self._confmo_ok("sys/svc-ext/redfish-svc", "commRedfish", adminState="enabled")
+        _logout_ok(responses)
+        with CimcXmlApi(HOST, CRED) as api:
+            changed, attrs = api.enable_redfish()
+        assert changed and attrs["adminState"] == "enabled"
+        assert "configConfMo" in responses.calls[2].request.body.decode()
+
+    @responses.activate
+    def test_boot_order_is_a_precision_tree_without_a_reboot(self):
+        _login_ok(responses)
+        self._confmo_ok("sys/rack-unit-1/boot-precision", "lsbootDevPrecision",
+                        configuredBootMode="Legacy")
+        _logout_ok(responses)
+        with CimcXmlApi(HOST, CRED) as api:
+            changed, _ = api.set_boot_order("disk,pxe")
+        assert changed
+        body = responses.calls[1].request.body.decode()
+        assert 'inHierarchical="true"' in body
+        assert ('<lsbootDevPrecision dn="sys/rack-unit-1/boot-precision" '
+                'configuredBootMode="Legacy" rebootOnUpdate="no">') in body
+        assert '<lsbootHdd rn="hdd-local" name="local" order="1" state="Enabled" />' in body
+        assert ('<lsbootPxe rn="pxe-net" name="net" order="2" state="Enabled" slot="L" '
+                'port="0" />') in body
+
+    def test_boot_order_rejects_unknown_devices(self):
+        api = CimcXmlApi(HOST, CRED)
+        with pytest.raises(ValueError, match="disk and pxe"):
+            api.set_boot_order("floppy,disk")
+
+    @responses.activate
+    def test_lom_option_rom(self):
+        _login_ok(responses)
+        self._resolve_ok("sys/rack-unit-1/bios/bios-settings/LOMPort-OptionROM",
+                         "biosVfLOMPortOptionROM", vpLOMPortsAllState="Disabled")
+        self._confmo_ok("sys/rack-unit-1/bios/bios-settings/LOMPort-OptionROM",
+                        "biosVfLOMPortOptionROM", vpLOMPortsAllState="Enabled")
+        _logout_ok(responses)
+        with CimcXmlApi(HOST, CRED) as api:
+            changed, attrs = api.enable_lom_pxe()
+        assert changed and attrs["vpLOMPortsAllState"] == "Enabled"
+
+
+class TestKvmTokensUnsupported:
+    @responses.activate
+    def test_old_firmware_without_the_token_method_is_not_an_error(self):
+        _login_ok(responses)
+        responses.add(
+            responses.POST, NUOVA,
+            body='<aaaGetComputeAuthTokens cookie="x" response="yes" errorCode="2009" '
+                 'invocationResult="unidentified-fail" errorDescr="Method not supported."/>',
+        )
+        _logout_ok(responses)
+        with CimcXmlApi(HOST, CRED) as api:
+            links = api.kvm_launch()
+        assert links["tokens_unsupported"] is True
+        assert links["html5"] is None and links["java"] is None
+        assert links["cimc"] == f"https://{HOST}/"
+        assert "Method not supported" in links["reason"]
+
+    @responses.activate
+    def test_other_token_failures_still_raise(self):
+        _login_ok(responses)
+        responses.add(
+            responses.POST, NUOVA,
+            body='<aaaGetComputeAuthTokens cookie="x" response="yes" errorCode="552" '
+                 'errorDescr="Authorization required"/>',
+        )
+        _logout_ok(responses)
+        with pytest.raises(BMCError, match="Authorization required"):
+            with CimcXmlApi(HOST, CRED) as api:
+                api.kvm_launch()
 
 
 class TestPowerEndpoints:

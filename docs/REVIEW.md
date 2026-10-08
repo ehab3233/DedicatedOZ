@@ -230,19 +230,29 @@ else.
    chainload the distro kernel directly from iPXE, with the ramdisk stage
    done as a separate rescue-style job first.
 
-6. **Serial console.** Needs IPMI over LAN and SOL enabled on the CIMC, and
-   BIOS console redirection on COM0 at 115200. **Prepare BMC** sets all three
-   over the CIMC XML API using the object names Cisco's own SDK uses, then
-   proves IPMI and SOL work. The XML API calls are tested against recorded
-   request shapes, not a real CIMC: if one is rejected, the job log shows the
-   CIMC's error and the web UI can do the same by hand.
+6. **Serial console and the rest of the CIMC setup.** Needs IPMI over LAN
+   and SOL enabled on the CIMC, and BIOS console redirection on COM0 at
+   115200. **Prepare BMC** (run when a server is added) sets those, plus
+   virtual media, KVM, Redfish, the LAN-port PXE option ROMs, the boot order
+   and NTP, over the CIMC XML API using the object names Cisco's own SDK
+   uses, then proves IPMI and SOL work. Each setting is read before it is
+   written: on a real C220 M4, rewriting IPMI over LAN restarted the CIMC's
+   IPMI service and the panel lost the server for a while after a re-run, so
+   a re-run now writes nothing on a prepared CIMC. The XML API calls are
+   tested against recorded request shapes, not a real CIMC: the first three
+   settings have run on a real M4, the rest have not yet. If one is rejected,
+   the job log shows the CIMC's error and lists it at the end; the web UI can
+   do the same by hand.
 
 7. **The HTML5 KVM viewer's URL.** The one-time token call
    (`aaaGetComputeAuthTokens`) is documented; the path of the HTML5 viewer
    has moved between CIMC releases. The panel probes the known paths and
    falls back to the Java launcher and the CIMC web UI, and
    `DOZ_KVM_URL_TEMPLATE` pins it once the bench test shows which one yours
-   uses.
+   uses. One C220 M4 in the field answers the token call itself with "Method
+   not supported" (CIMC error 2009); on that firmware the KVM button opens
+   the CIMC web UI, where Launch KVM works after a login. A launch that skips
+   the login needs that firmware's version and what its Launch KVM link does.
 
 8. **What the CIMC's sensor list looks like.** The parser handles ipmitool's
    formats (numeric readings with units, discrete state text, hex state

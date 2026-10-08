@@ -216,6 +216,7 @@ function AddServerModal({ onClose, onCreated }: { onClose: () => void; onCreated
   const [switchPort, setSwitchPort] = useState('')
   const [mac, setMac] = useState('')
   const [notes, setNotes] = useState('')
+  const [prepare, setPrepare] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
 
@@ -254,6 +255,7 @@ function AddServerModal({ onClose, onCreated }: { onClose: () => void; onCreated
         switch_port: switchPort || null,
         provisioning_mac: mac || null,
         notes: notes || null,
+        prepare_bmc: prepare,
       })
       onCreated()
     } catch (e) {
@@ -326,7 +328,8 @@ function AddServerModal({ onClose, onCreated }: { onClose: () => void; onCreated
           <label htmlFor="notes">Notes</label>
           <textarea id="notes" value={notes} onChange={(e) => setNotes(e.target.value)} style={{ minHeight: 56 }} />
         </div>
-        <p className="faint small">On save, an inventory sync reads the hardware over Redfish and records the PXE MAC. If the CIMC is unreachable, that job fails and says why.</p>
+        <label className="check"><input type="checkbox" checked={prepare} onChange={(e) => setPrepare(e.target.checked)} /> Prepare the BMC on save: switch on IPMI over LAN, SOL, KVM, virtual media, Redfish and PXE in the CIMC, set the boot order, then prove IPMI works. One-time; the settings stay in the CIMC.</label>
+        <p className="faint small">Then an inventory sync reads the hardware over Redfish and records the PXE MAC. If the CIMC is unreachable, the job fails and says why.</p>
       </form>
     </Modal>
   )

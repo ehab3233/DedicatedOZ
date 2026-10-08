@@ -176,6 +176,7 @@ export interface AdminServer extends ServerDetail {
   provisioning_mac: string | null
   last_wiped_at: string | null
   state_changed_at: string | null
+  bmc_prepared_at: string | null
   notes: string | null
   customer_email: string | null
 }
@@ -340,6 +341,7 @@ export const api = {
     customer_vlan?: number | null
     provisioning_mac?: string | null
     notes?: string | null
+    prepare_bmc?: boolean
   }) => request<AdminServer>('/api/v1/admin/servers', { method: 'POST', body: JSON.stringify(body) }),
   updateServer: (id: string, body: Record<string, unknown>) =>
     request<AdminServer>(`/api/v1/admin/servers/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
@@ -375,7 +377,14 @@ export const api = {
   prepareBmc: (id: string) =>
     request<Job>(`/api/v1/admin/servers/${id}/prepare-bmc`, { method: 'POST' }),
   launchKvm: (id: string) =>
-    request<{ html5: string | null; java: string; cimc: string; firmware: string | null }>(
+    request<{
+      html5: string | null
+      java: string | null
+      cimc: string
+      firmware: string | null
+      tokens_unsupported?: boolean
+      reason?: string | null
+    }>(
       `/api/v1/admin/servers/${id}/kvm`,
       { method: 'POST' },
     ),

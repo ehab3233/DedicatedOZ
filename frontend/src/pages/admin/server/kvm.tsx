@@ -21,7 +21,16 @@ export function useKvmLauncher(serverId: string) {
     const win = window.open('about:blank', '_blank')
     try {
       const result = await api.launchKvm(serverId)
-      if (result.html5) {
+      if (result.tokens_unsupported) {
+        // This CIMC build cannot issue launch tokens, so the next best thing
+        // is its own web UI: land on it, log in, click Launch KVM there.
+        if (win) win.location.href = result.cimc
+        setJava(null)
+        toast.info(
+          `CIMC ${result.firmware ?? ''} does not issue KVM tokens, so the CIMC web UI opened instead: `
+          + 'log in and use its Launch KVM.',
+        )
+      } else if (result.html5) {
         if (win) win.location.href = result.html5
         setJava(null)
       } else {

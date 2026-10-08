@@ -174,6 +174,8 @@ class Server(Base, TimestampMixin):
     health_detail: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
     health_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_power_state: Mapped[str | None] = mapped_column(String(16))
+    #: When Prepare BMC last proved IPMI works on this CIMC. Null: never run.
+    bmc_prepared_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     subscriptions: Mapped[list[Subscription]] = relationship(back_populates="server")
     jobs: Mapped[list[Job]] = relationship(back_populates="server")

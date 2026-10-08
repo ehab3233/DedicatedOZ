@@ -76,6 +76,15 @@ class Settings(BaseSettings):
     # fall back to the Java launcher. Placeholders: {host} {tkn1} {tkn2}.
     kvm_url_template: str = ""
 
+    # What Prepare BMC sets as the persistent legacy boot order: "disk,pxe"
+    # (boot the installed OS; installs use a one-time PXE override),
+    # "pxe,disk" (every boot asks the management server first), or empty to
+    # leave the boot order alone.
+    bmc_prepare_boot_order: str = "disk,pxe"
+    # NTP servers Prepare BMC points each CIMC at (comma-separated), so the
+    # event log carries real timestamps. Empty leaves the CIMC's clock alone.
+    ntp_servers: str = ""
+
     # Live sensor, event-log and BMC-info reads for the panel are cached this
     # long, so several open tabs share one BMC round trip instead of each
     # starting their own IPMI session.

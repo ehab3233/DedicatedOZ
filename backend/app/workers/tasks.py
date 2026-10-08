@@ -27,6 +27,7 @@ from app.enums import ActorType, JobState, JobType, PowerAction, ServerState
 from app.models import Image, Job, Server
 from app.services import images
 from app.services import jobs as job_service
+from app.services.dispatch import enqueue
 from app.services.lifecycle import IllegalTransition, transition_server
 from app.workers.celery_app import celery_app
 
@@ -225,13 +226,20 @@ def bmc_setup_task(self, job_id: str) -> dict:  # noqa: ANN001
     """Make a CIMC ready for the platform, then prove it.
 
     1. Over the CIMC XML API: IPMI over LAN on, SOL on at 115200 on COM0, BIOS
-       console redirection to COM0 (that last one applies at the next boot).
+       console redirection to COM0, virtual media on, KVM on, Redfish on, PXE
+       option ROMs on the LAN ports, the boot order, and NTP. BIOS changes
+       apply at the next boot.
     2. Over IPMI: read power state and SOL settings. If the XML API was not
        available (not a Cisco, or the XML API is switched off) but IPMI works,
        SOL is enabled over IPMI instead.
 
-    Steps that fail are logged and the job carries on; it fails only if IPMI
-    does not work at the end, because that is what power and console need.
+    Every setting is read first and only written when it differs, so a
+    re-run on a prepared CIMC changes nothing (and does not restart its IPMI
+    service, which a rewrite of IPMI over LAN does). Steps that fail are
+    logged and the job carries on; it fails only if IPMI does not work at the
+    end, because that is what power and console need. With
+    `inventory_after` in the payload (set when a server is added) it queues
+    the inventory sync once the services it needs are on.
     """
     with job_runner(job_id) as ctx:
         if ctx is None:
@@ -251,21 +259,35 @@ def bmc_setup_task(self, job_id: str) -> dict:  # noqa: ANN001
                 str(server.cimc_ip), credential, port=server.redfish_port, log=sink
             ) as api:
                 result["xml_api"]["firmware"] = api.version
-                for step, fn in (
+                steps: list[tuple[str, Callable[[], tuple[bool, dict]]]] = [
                     ("ipmi_over_lan", api.enable_ipmi_over_lan),
                     ("sol", api.enable_sol),
                     ("bios_console_redirection", api.set_console_redirection),
-                ):
+                    ("virtual_media", api.enable_vmedia),
+                    ("kvm", api.enable_kvm),
+                    ("redfish", api.enable_redfish),
+                    ("lom_pxe_option_rom", api.enable_lom_pxe),
+                ]
+                boot_order = settings.bmc_prepare_boot_order.strip()
+                if boot_order:
+                    steps.append(("boot_order", lambda: api.set_boot_order(boot_order)))
+                ntp = [s.strip() for s in settings.ntp_servers.split(",") if s.strip()]
+                if ntp:
+                    steps.append(("ntp", lambda: api.set_ntp(ntp)))
+                for step, fn in steps:
                     try:
-                        applied = fn()
-                        result["xml_api"][step] = "ok"
+                        changed, applied = fn()
+                        result["xml_api"][step] = "ok" if changed else "unchanged"
                         job_service.log(
-                            db, job, f"{step.replace('_', ' ')}: set {applied or ''}".strip(),
+                            db, job,
+                            f"{step.replace('_', ' ')}: "
+                            f"{'set' if changed else 'already set'} {applied or ''}".strip(),
                             customer_visible=False,
                         )
-                    except BMCError as exc:
+                    except (BMCError, ValueError) as exc:
                         result["xml_api"][step] = f"failed: {exc}"
-                        job_service.log(db, job, f"{step}: {exc}", level="warning")
+                        job_service.log(db, job, f"{step}: {exc}", level="warning",
+                                        customer_visible=True)
                     db.commit()
         except BMCError as exc:
             result["xml_api"]["error"] = str(exc)
@@ -314,13 +336,46 @@ def bmc_setup_task(self, job_id: str) -> dict:  # noqa: ANN001
                             customer_visible=True)
 
         job.result = result
+        server.bmc_prepared_at = datetime.now(UTC)
         db.add(server)
-        job_service.set_stage(
-            db, job,
-            "BMC ready. Console redirection takes effect at the next boot.",
-            progress=100,
+        outcomes = result["xml_api"]
+        rejected = [k for k, v in outcomes.items() if str(v).startswith("failed")]
+        changed = [k for k, v in outcomes.items() if v == "ok"]
+        bios_changed = any(
+            k in changed for k in ("bios_console_redirection", "lom_pxe_option_rom", "boot_order")
         )
+        if rejected:
+            job_service.log(
+                db, job,
+                "settings this firmware rejected: " + ", ".join(rejected)
+                + ". IPMI works, so power and the consoles do; set the rejected ones in "
+                "the CIMC web UI by hand.",
+                level="warning", customer_visible=True,
+            )
+            stage = f"BMC ready; {len(rejected)} setting(s) need the web UI"
+        elif not changed and "error" not in outcomes:
+            stage = "BMC already prepared; nothing changed"
+        elif bios_changed:
+            stage = "BMC ready; BIOS changes apply at the next boot"
+        else:
+            stage = "BMC ready"
+        job_service.set_stage(db, job, stage, progress=100)
         db.commit()
+
+        if (job.payload or {}).get("inventory_after"):
+            follow, _ = job_service.create_job(
+                db,
+                job_type=JobType.INVENTORY_SYNC,
+                server_id=server.id,
+                payload={},
+                requested_by_id=job.requested_by_id,
+                requested_by_type=job.requested_by_type,
+            )
+            db.commit()
+            db.refresh(follow)
+            enqueue(db, follow)
+            job_service.log(db, job, "inventory sync queued", customer_visible=False)
+            db.commit()
         return result
 
 

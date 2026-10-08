@@ -223,6 +223,7 @@ class AdminServerOut(ServerDetailOut):
     provisioning_mac: str | None
     last_wiped_at: datetime | None
     state_changed_at: datetime | None = None
+    bmc_prepared_at: datetime | None = None
     notes: str | None
     customer_email: str | None = None
 
@@ -246,6 +247,8 @@ class ServerCreate(BaseModel):
     customer_vlan: int | None = Field(default=None, ge=1, le=4094)
     provisioning_mac: str | None = None
     notes: str | None = None
+    #: Queue Prepare BMC straight away, ahead of the inventory sync.
+    prepare_bmc: bool = True
 
 
 class ServerUpdate(BaseModel):

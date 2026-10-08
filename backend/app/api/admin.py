@@ -118,7 +118,9 @@ def create_server(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    server = Server(**{**payload.model_dump(), "provisioning_mac": mac})
+    server = Server(
+        **{**payload.model_dump(exclude={"prepare_bmc"}), "provisioning_mac": mac}
+    )
     db.add(server)
     record_audit(
         db,
@@ -134,8 +136,13 @@ def create_server(
     db.commit()
     db.refresh(server)
 
-    # Pull hardware detail straight away; the PXE MAC comes from here.
-    _dispatch(db, JobType.INVENTORY_SYNC, server, admin)
+    if payload.prepare_bmc:
+        # Switch the CIMC's services on first; the inventory sync (which needs
+        # Redfish) is queued by that job when it finishes. The PXE MAC comes
+        # from the sync.
+        _dispatch(db, JobType.BMC_SETUP, server, admin, payload={"inventory_after": True})
+    else:
+        _dispatch(db, JobType.INVENTORY_SYNC, server, admin)
     return _admin_server(db, server)
 
 
@@ -798,6 +805,7 @@ def _admin_server(db: Session, server: Server) -> AdminServerOut:
             "provisioning_mac": server.provisioning_mac,
             "last_wiped_at": server.last_wiped_at,
             "state_changed_at": server.state_changed_at,
+            "bmc_prepared_at": server.bmc_prepared_at,
             "notes": server.notes,
         }
     )
@@ -839,13 +847,15 @@ def _admin_server(db: Session, server: Server) -> AdminServerOut:
     return out
 
 
-def _dispatch(db: Session, job_type: JobType, server: Server, admin: Customer) -> Job:
+def _dispatch(
+    db: Session, job_type: JobType, server: Server, admin: Customer, payload: dict | None = None
+) -> Job:
     try:
         job, _ = job_service.create_job(
             db,
             job_type=job_type,
             server_id=server.id,
-            payload={},
+            payload=payload or {},
             requested_by_id=admin.id,
             requested_by_type=ActorType.ADMIN,
         )
