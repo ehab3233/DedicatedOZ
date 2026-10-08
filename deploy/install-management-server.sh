@@ -82,9 +82,17 @@ as_postgres() { runuser -u postgres -- "$@"; }
 [ -n "$PXE_MODE" ] || die "first install: choose --dhcp-range START,END, --proxy-dhcp or --no-pxe"
 
 . /etc/os-release
+[ "${ID:-}" = ubuntu ] || die "this installer targets Ubuntu (found ${PRETTY_NAME:-unknown})"
 case "${VERSION_ID:-}" in
-    22.04|24.04) ;;
-    *) die "this installer targets Ubuntu 22.04 or 24.04 (found ${PRETTY_NAME:-unknown})" ;;
+    22.04|24.04|26.04) ;;
+    *)
+        # Newer than this script knows: the package names below have been
+        # stable across releases, so continue and say so. Older is refused.
+        if [ "${VERSION_ID%%.*}" -ge 24 ] 2>/dev/null; then
+            echo "note: Ubuntu ${VERSION_ID} is newer than this installer was tested on; continuing"
+        else
+            die "this installer needs Ubuntu 22.04 or newer (found ${PRETTY_NAME:-unknown})"
+        fi ;;
 esac
 
 export DEBIAN_FRONTEND=noninteractive
@@ -141,11 +149,26 @@ say "installing packages"
 # dnsmasq-base, not dnsmasq: the full package brings its own service, which
 # listens for DNS on port 53 (clashing with systemd-resolved) and registers
 # itself as the host's resolver. We run dnsmasq under our own unit instead.
+# Redis, or Valkey where a release has dropped Redis (Debian did; Ubuntu
+# ships both for now). Same protocol, same port; only the unit name differs.
+# (Captured into a variable, not piped into grep -q: under pipefail, grep -q
+# closing the pipe early makes the whole pipeline report failure.)
+apt_candidate() { apt-cache policy "$1" 2>/dev/null | sed -n 's/^ *Candidate: \([0-9].*\)$/\1/p'; }
+if [ -n "$(apt_candidate redis-server)" ]; then
+    REDIS_PKG=redis-server; REDIS_UNIT=redis-server
+elif [ -n "$(apt_candidate valkey-server)" ]; then
+    REDIS_PKG=valkey-server; REDIS_UNIT=valkey-server
+else
+    die "neither redis-server nor valkey-server is available from apt"
+fi
 apt-get install -y -qq --no-install-recommends \
-    git rsync postgresql redis-server nginx dnsmasq-base \
+    git rsync postgresql "$REDIS_PKG" nginx dnsmasq-base \
     ipmitool libarchive-tools >/dev/null
+note "queue broker: $REDIS_PKG"
+echo "REDIS_UNIT=$REDIS_UNIT" >> "$CONF"
 
-# Python: the code needs 3.11+. 24.04 ships 3.12; 22.04 ships 3.10.
+# Python: the code needs 3.11+. 22.04 ships 3.10; 24.04 ships 3.12; 26.04
+# ships 3.14, and every dependency has wheels for it (checked at install).
 if [ "$VERSION_ID" = "22.04" ]; then
     if ! command -v python3.11 >/dev/null; then
         note "Ubuntu 22.04: adding deadsnakes for python3.11"
@@ -219,7 +242,7 @@ chown doz:doz /etc/doz/cimc; chmod 700 /etc/doz/cimc
 # ---------------------------------------------------------------------------
 
 say "database"
-systemctl enable --now postgresql redis-server >/dev/null
+systemctl enable --now postgresql "$REDIS_UNIT" >/dev/null
 for _ in $(seq 1 30); do as_postgres psql -qtAc "SELECT 1" >/dev/null 2>&1 && break; sleep 1; done
 if [ -f /etc/doz/doz.env ] && grep -q '^DOZ_DATABASE_URL=' /etc/doz/doz.env; then
     DB_PASS="$(sed -n 's|^DOZ_DATABASE_URL=postgresql+psycopg://doz:\([^@]*\)@.*|\1|p' /etc/doz/doz.env)"
@@ -339,7 +362,7 @@ part() {
 [Unit]
 Description=DedicatedOZ $description
 PartOf=doz.service
-After=network-online.target postgresql.service redis-server.service
+After=network-online.target postgresql.service ${REDIS_UNIT}.service
 Wants=network-online.target
 
 [Service]
@@ -417,7 +440,7 @@ cat > /etc/systemd/system/doz.service <<UNIT
 Description=DedicatedOZ control plane
 Documentation=file://$INSTALL_DIR/docs/GETTING-STARTED.md
 Wants=$WANTS
-After=postgresql.service redis-server.service
+After=postgresql.service ${REDIS_UNIT}.service
 
 # The umbrella: start, stop and restart it and every part follows (each part
 # is PartOf=doz.service). The work happens in the parts; this unit only

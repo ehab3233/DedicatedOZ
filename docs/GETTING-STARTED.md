@@ -47,21 +47,45 @@ You cannot run two authoritative DHCP servers on one network. Pick one.
 
 ## 2. Install the management server
 
-On the fresh Ubuntu 22.04 or 24.04 VM, with a static IP already configured:
+On a fresh Ubuntu VM (22.04, 24.04 or 26.04) with a static IP already
+configured, one command does everything:
 
 ```sh
-sudo apt install -y git
-git clone https://github.com/ehab3233/DedicatedOZ.git
-cd DedicatedOZ
-sudo ./doz.sh install --ip 10.0.0.5 --dhcp-range 10.0.0.200,10.0.0.249
-# or, with your router still doing DHCP:
-sudo ./doz.sh install --ip 10.0.0.5 --proxy-dhcp
-# or, no netboot yet -- just the panel, power and consoles:
-sudo ./doz.sh install --ip 10.0.0.5 --no-pxe
+curl -fsSL https://raw.githubusercontent.com/ehab3233/DedicatedOZ/HEAD/install.sh | sudo bash
 ```
 
-About ten minutes. It ends with the portal URL and a one-time admin password.
-Log in at `http://10.0.0.5` straight away and confirm you get the Manage tab.
+It fetches the code, installs the whole management server as the `doz`
+service, starts a simulated BMC (server SIM-0001) so there is something to
+try, and ends with the panel address and a one-time admin password. About
+ten minutes. Run the same command again later to update.
+
+By default it sets up **no DHCP or PXE**. That is the right choice when the
+servers' CIMCs sit on a different VLAN with routing in between: power,
+consoles, sensors, the event log and ISO installs over virtual media all
+work across routing, and nothing on the network is touched. If this VM is on
+the same flat network as the servers and should netboot them, choose one of
+these instead:
+
+```sh
+# this VM becomes the DHCP server for the flat network:
+DOZ_PXE=range DOZ_DHCP_RANGE=10.0.0.200,10.0.0.249 \
+  curl -fsSL https://raw.githubusercontent.com/ehab3233/DedicatedOZ/HEAD/install.sh | sudo bash
+# your router keeps doing DHCP; this only adds the PXE options:
+DOZ_PXE=proxy curl -fsSL https://raw.githubusercontent.com/ehab3233/DedicatedOZ/HEAD/install.sh | sudo bash
+```
+
+Netbooting servers on a routed VLAN additionally needs a DHCP relay (an
+"IP helper" on the router) pointing at this VM and a DHCP range for that
+VLAN; ask before you need it, it is a small change to the dnsmasq config.
+
+The long form, from a checkout, is the same installer with flags:
+
+```sh
+sudo ./doz.sh install --ip 10.0.0.5 --no-pxe        # or --dhcp-range A,B, or --proxy-dhcp
+```
+
+Log in at `http://<the VM's address>` straight away and confirm you land on
+the dashboard.
 
 Everything runs as one Ubuntu service, `doz`, enabled at boot:
 
@@ -77,9 +101,10 @@ so a pile of reinstalls can never sit in front of a power button), the
 scheduler, and PXE. **Manage → Fleet** shows the same thing in its System
 card; if a queue has no worker, it says so in red.
 
-To update later: `git pull && sudo ./doz.sh update`. The settings from the
-first install are remembered in `/etc/doz/install.conf`; secrets in
-`/etc/doz/doz.env` are never overwritten.
+To update later, run the one-liner again (or `git pull && sudo ./doz.sh
+update` from a checkout). The settings from the first install are remembered
+in `/etc/doz/install.conf`; secrets in `/etc/doz/doz.env` are never
+overwritten.
 
 ### No hardware on the bench yet?
 

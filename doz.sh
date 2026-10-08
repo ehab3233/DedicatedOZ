@@ -265,7 +265,9 @@ sd_status() {
         [ -f "/etc/systemd/system/$part.service" ] || continue
         printf '  %-22s %s\n' "$part" "$(systemctl is-active "$part" 2>/dev/null)"
     done
-    for dep in postgresql redis-server nginx; do
+    redis_unit=redis-server
+    [ -f /etc/doz/install.conf ] && redis_unit="$(sed -n 's/^REDIS_UNIT=//p' /etc/doz/install.conf)"
+    for dep in postgresql "${redis_unit:-redis-server}" nginx; do
         printf '  %-22s %s\n' "$dep" "$(systemctl is-active "$dep" 2>/dev/null)"
     done
     printf '  %-22s ' "api health"

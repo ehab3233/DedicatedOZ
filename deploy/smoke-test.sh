@@ -15,10 +15,11 @@ ROOT=/opt/doz
 
 . /etc/doz/install.conf
 EMAIL="${ADMIN_EMAIL:-admin@example.com}"
+REDIS_UNIT="${REDIS_UNIT:-redis-server}"
 
 echo "== service =="
 failed=0
-for unit in doz doz-api doz-worker-power doz-worker-provision doz-worker-poll doz-beat doz-pxe nginx postgresql redis-server; do
+for unit in doz doz-api doz-worker-power doz-worker-provision doz-worker-poll doz-beat doz-pxe nginx postgresql "$REDIS_UNIT"; do
     [ "$unit" = doz-pxe ] && [ ! -f /etc/systemd/system/doz-pxe.service ] && continue
     state="$(systemctl is-active "$unit" 2>/dev/null || true)"
     printf '  %-44s %s\n' "$unit" "$state"

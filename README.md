@@ -175,13 +175,27 @@ failure ambiguous.
 
 ### On the management server (production)
 
-A fresh Ubuntu 22.04 / 24.04 VM becomes the whole control plane — API,
-workers, nginx, PXE — in one command, installed as the `doz` service:
+A fresh Ubuntu VM (22.04, 24.04 or 26.04) becomes the whole control plane —
+API, workers, nginx, and a simulated BMC to click on — with one command,
+installed as the `doz` service:
 
 ```sh
-git clone https://github.com/ehab3233/DedicatedOZ.git && cd DedicatedOZ
-sudo ./doz.sh install --ip 10.0.0.5 --dhcp-range 10.0.0.200,10.0.0.249
+curl -fsSL https://raw.githubusercontent.com/ehab3233/DedicatedOZ/HEAD/install.sh | sudo bash
 ```
+
+That sets up no DHCP or PXE, which is right when the servers' CIMCs are on a
+routed VLAN rather than the VM's own: power, consoles, sensors and ISO
+installs through virtual media all work over routing. For a flat network
+where this VM should also netboot servers, give it a DHCP range:
+
+```sh
+DOZ_PXE=range DOZ_DHCP_RANGE=10.0.0.200,10.0.0.249 \
+  curl -fsSL https://raw.githubusercontent.com/ehab3233/DedicatedOZ/HEAD/install.sh | sudo bash
+```
+
+Run the same command again to update. The long form, from a checkout, is
+`sudo ./doz.sh install --ip 10.0.0.5 --no-pxe` (or `--dhcp-range A,B`, or
+`--proxy-dhcp`).
 
 `doz` is one systemd unit over all the parts, so the usual commands work on
 the whole stack and it starts at boot:
@@ -200,9 +214,9 @@ twenty-minute reinstall never holds up someone's power button.
 To try power control and the serial console before any hardware arrives:
 
 ```sh
-sudo apt install --no-install-recommends openipmi
-sudo ./doz.sh sim start          # a simulated BMC, registered as server SIM-0001
-sudo ./deploy/smoke-test.sh      # drives power and the console through nginx; resets the admin password
+sudo ./doz.sh sim start          # a simulated BMC, registered as server SIM-0001 (the one-liner does this)
+sudo ./doz.sh sim events         # put a few entries in its event log
+sudo ./deploy/smoke-test.sh      # drives power, sensors, the event log and the console through nginx
 ```
 
 Then **[docs/GETTING-STARTED.md](docs/GETTING-STARTED.md)** walks through
