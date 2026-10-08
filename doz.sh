@@ -20,9 +20,10 @@
 #   ./doz.sh restart       stop, start
 #   ./doz.sh status        every part, plus which job queues have a worker
 #   ./doz.sh logs [part]   follow logs (api | power | provision | poll | beat | pxe | all)
-#   ./doz.sh sim start|stop|status
+#   ./doz.sh sim start|stop|status|events|remove
 #                          a simulated BMC on this machine, registered as SIM-0001,
-#                          for trying power and the serial console without hardware
+#                          for trying power, sensors, the event log and the serial
+#                          console without hardware (events: add sample log entries)
 #   ./doz.sh init          create/upgrade the schema, seed templates, create the admin
 #   ./doz.sh reset-admin EMAIL    set a new password on an admin account
 #   ./doz.sh test          run the backend tests
@@ -404,8 +405,9 @@ cmd_sim() {
             ;;
         stop)   run stop ;;
         status) run status ;;
+        events) run events ;;
         remove) run stop; register --remove ;;
-        *) die "usage: ./doz.sh sim start|stop|status|remove" ;;
+        *) die "usage: ./doz.sh sim start|stop|status|events|remove" ;;
     esac
 }
 
