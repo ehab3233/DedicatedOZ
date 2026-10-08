@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { api, setToken, type Me } from '../api'
+import { ApiError, api, setToken, type Me } from '../api'
 import { Banner } from '../components'
 import { BrandMark } from '../layout/Shell'
 
@@ -18,7 +18,12 @@ export default function Login({ onAuthenticated }: { onAuthenticated: (me: Me) =
       setToken(access_token)
       onAuthenticated(await api.me())
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Sign in failed')
+      if (e instanceof ApiError && e.status === 401) {
+        setError('Email or password is incorrect. The installer printed the admin password once; '
+          + 'reset it with: sudo /opt/doz/doz.sh reset-admin <email>')
+      } else {
+        setError(e instanceof Error ? e.message : 'Sign in failed')
+      }
       setToken(null)
     } finally {
       setBusy(false)

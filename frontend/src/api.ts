@@ -36,9 +36,10 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     },
   })
 
-  if (response.status === 401) {
+  if (response.status === 401 && !path.endsWith('/auth/login')) {
     // The session is gone. Clear it so the router bounces to login rather
-    // than every subsequent call failing in a different place.
+    // than every subsequent call failing in a different place. A 401 from
+    // the login form itself is a wrong password, and says so below.
     setToken(null)
     throw new ApiError(401, 'Your session has expired. Please sign in again.')
   }
