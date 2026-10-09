@@ -100,7 +100,7 @@ loops on the first filename. On a MikroTik (RouterOS 7):
 /ip dhcp-server network set [find] next-server=172.16.100.193 boot-file-name=undionly.kpxe
 /ip dhcp-server option add name=doz-ipxe code=67 value="'http://172.16.100.193/boot/ipxe'"
 /ip dhcp-server option sets add name=doz-ipxe options=doz-ipxe
-/ip dhcp-server matcher add name=doz-ipxe server=dhcp1 code=77 value=iPXE option-set=doz-ipxe
+/ip dhcp-server matcher add name=doz-ipxe server=dhcp1 code=77 value=iPXE matching-type=exact option-set=doz-ipxe
 ```
 
 (`dhcp1` is the DHCP server's name in `/ip dhcp-server print`.) The servers'

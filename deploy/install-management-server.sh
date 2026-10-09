@@ -741,7 +741,7 @@ cat <<EXTERNAL
    /ip dhcp-server network set [find] next-server=${MGMT_IP} boot-file-name=undionly.kpxe
    /ip dhcp-server option add name=doz-ipxe code=67 value="'http://${MGMT_IP}/boot/ipxe'"
    /ip dhcp-server option sets add name=doz-ipxe options=doz-ipxe
-   /ip dhcp-server matcher add name=doz-ipxe server=<dhcp server name> code=77 value=iPXE option-set=doz-ipxe
+   /ip dhcp-server matcher add name=doz-ipxe server=<dhcp server name> code=77 value=iPXE matching-type=exact option-set=doz-ipxe
  The servers' VLAN must reach this VM on UDP 69 and TCP 80 and 8080.
 EXTERNAL
 fi
