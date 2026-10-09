@@ -38,6 +38,15 @@ XML_LEVEL = {
     RaidLevel.RAID0: 0, RaidLevel.RAID1: 1, RaidLevel.RAID5: 5,
     RaidLevel.RAID6: 6, RaidLevel.RAID10: 10,
 }
+#: How a CIMC names a level: Redfish RAIDType, Redfish 1.0 VolumeType and
+#: the XML API's raidLevel all occur in the field.
+_LEVEL_NAMES = {
+    RaidLevel.RAID0: {"raid0", "raid 0", "nonredundant"},
+    RaidLevel.RAID1: {"raid1", "raid 1", "mirrored"},
+    RaidLevel.RAID5: {"raid5", "raid 5", "stripedwithparity"},
+    RaidLevel.RAID6: {"raid6", "raid 6"},
+    RaidLevel.RAID10: {"raid10", "raid 10", "spannedmirrors"},
+}
 #: Controllers that cannot build an array (the chipset SATA ports).
 _NOT_RAID = re.compile(r"ahci|sata|pch|nvme", re.IGNORECASE)
 _RAID = re.compile(r"raid|mraid|megaraid|sas", re.IGNORECASE)
@@ -125,6 +134,10 @@ def choose_drives(level: RaidLevel, drives: list[dict]) -> list[dict]:
         members = best if len(best) >= 4 else eligible
         return members[: len(members) - (len(members) % 2)]
     return eligible
+
+
+def level_matches(level: RaidLevel, name: str | None) -> bool:
+    return (name or "").strip().lower() in _LEVEL_NAMES.get(level, set())
 
 
 def _redfish_drive_is_jbod(d: dict) -> bool:
@@ -218,6 +231,32 @@ def _configure_redfish(
         f"{len(controller['volumes'])} virtual drives)")
     for d in controller["drives"]:
         log(describe_drive(d))
+
+    # An array that already is what was asked for is kept: rebuilding it
+    # gains nothing and the CIMC will not delete its boot drive anyway.
+    usable = [d for d in controller["drives"] if unusable_reason(d) is None]
+    wanted = len(choose_drives(level, usable)) if len(usable) >= MIN_DRIVES[level] else 0
+    kept = next(
+        (v for v in controller["volumes"]
+         if level_matches(level, v.get("raid_type")) and v.get("drive_count") == wanted
+         and str(v.get("health") or "OK").upper() in ("OK",)),
+        None,
+    ) if len(controller["volumes"]) == 1 else None
+    if kept is not None:
+        log(f"virtual drive {kept.get('name')} is already {level.value.upper()} over "
+            f"{wanted} drives and healthy; keeping it")
+        if xml_api is not None:
+            _ensure_boot_drive_xml(xml_api, kept.get("name"), log)
+        return {
+            "via": "redfish", "controller": controller["name"], "level": level.value,
+            "drives": [d["name"] for d in usable][:wanted], "volume": kept.get("name"),
+            "capacity_bytes": kept.get("capacity_bytes"), "kept": True,
+            "description": f"existing {level.value.upper()} virtual drive "
+                           f"{kept.get('name')} kept"
+                           + (f", {kept['capacity_bytes'] / 1_000_000_000:.0f} GB"
+                              if kept.get("capacity_bytes") else ""),
+        }
+
     if controller["volumes"]:
         for volume in controller["volumes"]:
             log(f"deleting virtual drive {volume.get('name')}")
@@ -282,6 +321,20 @@ def _configure_redfish(
     }
 
 
+def _ensure_boot_drive_xml(xml_api, name: str | None, log: LogSink) -> None:  # noqa: ANN001
+    """Mark the named virtual drive bootable over the XML API (Redfish on
+    the C220 M4 has no way to). Best effort: logged, never fatal."""
+    try:
+        with xml_api() as api:
+            for controller in api.storage_controllers():
+                for vd in api.virtual_drives(controller["dn"]):
+                    if vd.get("name") == name and vd.get("bootDrive") != "true":
+                        api.set_boot_drive(vd["dn"])
+                        log(f"virtual drive {name} marked as the boot drive")
+    except BMCError as exc:
+        log(f"could not check the boot drive flag ({exc})", level="warning")
+
+
 def _configure_xml(api: CimcXmlApi, level: RaidLevel, log: LogSink) -> dict:
     controllers = api.storage_controllers()
     controller = _raid_controller(
@@ -290,7 +343,31 @@ def _configure_xml(api: CimcXmlApi, level: RaidLevel, log: LogSink) -> dict:
     )
     dn = controller["dn"]
     log(f"RAID controller (XML API): {controller.get('id')} {controller.get('model') or ''}")
-    for vd in api.virtual_drives(dn):
+    existing = api.virtual_drives(dn)
+    if len(existing) == 1:
+        vd = existing[0]
+        members = int(vd.get("drivesPerSpan") or 0) * int(vd.get("spanDepth") or 1)
+        if (level_matches(level, vd.get("raidLevel"))
+                and vd.get("vdStatus", "Optimal") == "Optimal"
+                and members >= MIN_DRIVES[level]):
+            log(f"virtual drive {vd.get('name')} is already {vd.get('raidLevel')} over "
+                f"{members} drives and optimal; keeping it")
+            if vd.get("bootDrive") != "true":
+                api.set_boot_drive(vd["dn"])
+                log(f"virtual drive {vd.get('name')} marked as the boot drive")
+            return {
+                "via": "cimc-xml", "controller": controller.get("id"), "level": level.value,
+                "drives": [], "volume": vd.get("name"),
+                "capacity_bytes": _parse_size(vd.get("size") or "") or None, "kept": True,
+                "description": f"existing {vd.get('raidLevel')} virtual drive "
+                               f"{vd.get('name')} kept ({vd.get('size')})",
+            }
+    if any(vd.get("bootDrive") == "true" for vd in existing):
+        # "The Virtual Drive 0 is an OS Drive. This virtual drive cannot be
+        # deleted" until the controller's boot drive is cleared.
+        log("clearing the controller's boot drive so the virtual drive can be deleted")
+        api.clear_boot_drive(dn)
+    for vd in existing:
         log(f"deleting virtual drive {vd.get('name')}")
         try:
             api.delete_virtual_drive(vd["dn"])

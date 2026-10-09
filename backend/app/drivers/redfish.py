@@ -664,6 +664,7 @@ class RedfishDriver(BMCDriver):
                             "raid_type": v.get("RAIDType") or v.get("VolumeType"),
                             "capacity_bytes": v.get("CapacityBytes"),
                             "health": (v.get("Status") or {}).get("Health"),
+                            "drive_count": len((v.get("Links") or {}).get("Drives") or []),
                         })
                 except BMCError:
                     self._log(f"could not list volumes on {controller.get('Id')}", level="warning")

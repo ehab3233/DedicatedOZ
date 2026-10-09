@@ -391,6 +391,72 @@ class TestRaidOverXmlApiFlow:
         assert any("attributes: {" in m and "pdStatus" in m for m in logged)
 
 
+class TestRaidOverXmlApiExistingArray:
+    CTRL = "sys/rack-unit-1/board/storage-SAS-SLOT-HBA"
+
+    def _controller_and_vd(self, raid_level: str, boot: str) -> None:
+        _login_ok(responses)
+        responses.add(responses.POST, NUOVA, body=(
+            '<configResolveClass response="yes"><outConfigs>'
+            f'<storageController dn="{self.CTRL}" id="SLOT-HBA" type="SAS" raidSupport="yes" '
+            'model="Cisco 12G SAS Modular Raid Controller"/></outConfigs></configResolveClass>'
+        ))
+        responses.add(responses.POST, NUOVA, body=(
+            '<configResolveClass response="yes"><outConfigs>'
+            f'<storageVirtualDrive dn="{self.CTRL}/vd-0" id="0" name="RAID1_12" '
+            f'raidLevel="{raid_level}" size="952720 MB" vdStatus="Optimal" health="Good" '
+            f'bootDrive="{boot}" drivesPerSpan="2" spanDepth="1"/>'
+            '</outConfigs></configResolveClass>'
+        ))
+
+    @responses.activate
+    def test_a_matching_optimal_array_is_kept_and_made_bootable(self):
+        from app.services import raid
+
+        self._controller_and_vd("RAID 1", boot="false")
+        responses.add(responses.POST, NUOVA, body=(  # set-boot-drive
+            f'<configConfMo response="yes"><outConfig><storageVirtualDrive dn="{self.CTRL}/vd-0" '
+            'bootDrive="true"/></outConfig></configConfMo>'
+        ))
+        _logout_ok(responses)
+        with CimcXmlApi(HOST, CRED) as api:
+            summary = raid._configure_xml(api, raid.RaidLevel.RAID1,
+                                          lambda m, level="info", **kw: None)
+        assert summary["kept"] is True and summary["volume"] == "RAID1_12"
+        bodies = [c.request.body.decode() for c in responses.calls]
+        assert any(f'dn="{self.CTRL}/vd-0" adminAction="set-boot-drive"' in b for b in bodies)
+        assert not any('status="deleted"' in b or "VirtualDriveCreator" in b for b in bodies)
+
+    @responses.activate
+    def test_the_boot_drive_is_cleared_before_a_different_array_is_deleted(self):
+        # "The Virtual Drive 0 is an OS Drive. This virtual drive cannot be
+        # deleted": the controller's boot drive has to be cleared first.
+        from app.drivers.base import BMCError as Err
+        from app.services import raid
+
+        self._controller_and_vd("RAID 1", boot="true")
+        responses.add(responses.POST, NUOVA, body=(  # clear-boot-drive
+            f'<configConfMo response="yes"><outConfig><storageController dn="{self.CTRL}" '
+            'adminAction="no-op"/></outConfig></configConfMo>'
+        ))
+        responses.add(responses.POST, NUOVA, body=(  # delete
+            f'<configConfMo response="yes"><outConfig><storageVirtualDrive dn="{self.CTRL}/vd-0" '
+            'status="deleted"/></outConfig></configConfMo>'
+        ))
+        responses.add(responses.POST, NUOVA,  # disks: none left, to end the flow early
+                      body='<configResolveClass response="yes"><outConfigs/></configResolveClass>')
+        responses.add(responses.POST, NUOVA,
+                      body='<configResolveClass response="yes"><outConfigs/></configResolveClass>')
+        _logout_ok(responses)
+        with pytest.raises((raid.RaidError, Err)):
+            with CimcXmlApi(HOST, CRED) as api:
+                raid._configure_xml(api, raid.RaidLevel.RAID0, lambda m, level="info", **kw: None)
+        bodies = [c.request.body.decode() for c in responses.calls]
+        clear = next(i for i, b in enumerate(bodies) if 'adminAction="clear-boot-drive"' in b)
+        delete = next(i for i, b in enumerate(bodies) if 'status="deleted"' in b)
+        assert clear < delete
+
+
 class TestRaidPlanning:
     def _drive(self, name, cap, media="HDD", **extra):
         return {"name": name, "path": f"/d/{name}", "capacity_bytes": cap, "media": media,

@@ -286,6 +286,11 @@ class CimcXmlApi:
             controller_dn, "storageController", adminAction="clear-foreign-config"
         )
 
+    def clear_boot_drive(self, controller_dn: str) -> dict[str, str]:
+        """Unmark the controller's boot virtual drive. The CIMC refuses to
+        delete a virtual drive while it is the boot ("OS") drive."""
+        return self.configure(controller_dn, "storageController", adminAction="clear-boot-drive")
+
     def make_unconfigured_good(self, dn: str) -> dict[str, str]:
         return self.configure(dn, "storageLocalDisk", adminAction="make-unconfigured-good")
 

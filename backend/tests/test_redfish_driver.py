@@ -545,8 +545,10 @@ class TestRaid:
         for v in volumes:
             responses.add(responses.GET, f"{BASE}{self.MRAID}/Volumes/{v}", json={
                 "@odata.id": f"{self.MRAID}/Volumes/{v}", "Id": v, "Name": v,
-                "RAIDType": "RAID1", "CapacityBytes": 999_000_000_000,
+                "VolumeType": "Mirrored", "CapacityBytes": 999_000_000_000,
                 "Status": {"Health": "OK"},
+                "Links": {"Drives": [{"@odata.id": f"{self.MRAID}/Drives/1"},
+                                     {"@odata.id": f"{self.MRAID}/Drives/2"}]},
             })
 
     @responses.activate
@@ -559,7 +561,8 @@ class TestRaid:
         assert c["raid_types"] == ["RAID0", "RAID1", "RAID5"]
         assert [d["name"] for d in c["drives"]] == ["Disk 1", "Disk 2", "Disk 3"]
         assert c["drives"][0]["oem_state"] == "UnconfiguredGood"
-        assert c["volumes"][0]["name"] == "old" and c["volumes"][0]["raid_type"] == "RAID1"
+        assert c["volumes"][0]["name"] == "old" and c["volumes"][0]["raid_type"] == "Mirrored"
+        assert c["volumes"][0]["drive_count"] == 2
 
     @responses.activate
     def test_create_volume_posts_the_drives_and_waits_for_the_task(self):
@@ -611,3 +614,15 @@ class TestRaid:
         d = driver()
         d.delete_volume(d.storage()[0]["volumes"][0]["path"])
         assert any(c.request.method == "DELETE" for c in responses.calls)
+
+    @responses.activate
+    def test_an_array_that_already_matches_is_kept(self):
+        from app.enums import RaidLevel
+        from app.services import raid
+
+        self._controller(volumes=["old"])
+        summary = raid._configure_redfish(driver(), RaidLevel.RAID1,
+                                          lambda m, level="info", **kw: None)
+        assert summary["kept"] is True and summary["volume"] == "old"
+        assert not any(c.request.method in ("DELETE", "POST") and "Volumes" in c.request.url
+                       for c in responses.calls)
