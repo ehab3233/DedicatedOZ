@@ -21,9 +21,11 @@ from app.enums import (
     ActorType,
     JobState,
     JobType,
+    ServerState,
 )
-from app.models import Job, JobLogEntry
+from app.models import Job, JobLogEntry, Server
 from app.security import generate_callback_token
+from app.services.lifecycle import IllegalTransition, transition_server
 
 #: Job types that must not overlap on one server. Power reads are exempt.
 EXCLUSIVE_JOB_TYPES = {
@@ -221,6 +223,51 @@ def make_log_sink(db: Session, job: Job):
     return sink
 
 
+def release_server(db: Session, job: Job, *, reason: str) -> str | None:
+    """Put a server back after an install ended without installing anything.
+
+    An install moves its server to provisioning and only success moves it on,
+    so a failed, cancelled or timed-out install used to leave the server
+    there for good, locked. It returns to active when a customer holds it,
+    otherwise to in_stock. Returns the new state, or None if nothing changed.
+    """
+    if job.server_id is None or JobType(job.type) is not JobType.INSTALL:
+        return None
+    server = db.get(Server, job.server_id)
+    if server is None or ServerState(server.state) is not ServerState.PROVISIONING:
+        return None
+    target = ServerState.ACTIVE if server.active_subscription else ServerState.IN_STOCK
+    try:
+        transition_server(
+            db, server, target,
+            actor_type=ActorType.SYSTEM, actor_label=f"job:{job.type}", reason=reason,
+        )
+    except IllegalTransition:
+        return None
+    log(db, job, f"server returned to {target.value.replace('_', ' ')}", customer_visible=True)
+    return target.value
+
+
+def force_cancel(db: Session, job: Job, *, actor: str, reason: str) -> str | None:
+    """End a job now, whether or not any worker is still running it.
+
+    The ordinary cancel only sets a flag that a live worker notices at its
+    next check. A job whose worker was restarted or killed has nobody to
+    notice, and would sit in running until the reaper's deadline. This
+    writes the terminal state directly; a worker that is in fact still
+    holding the job sees the flag at its next check and stops without
+    touching the outcome. Returns the state the server was moved to, if any.
+    """
+    if JobState(job.state) in TERMINAL_JOB_STATES:
+        raise IllegalJobTransition(f"job is already {job.state}")
+    job.cancel_requested = True
+    transition_job(db, job, JobState.CANCELLED, error=f"force-cancelled by {actor}: {reason}")
+    log(
+        db, job, f"force-cancelled by {actor}: {reason}", level="warning", customer_visible=True,
+    )
+    return release_server(db, job, reason=f"job {job.id} force-cancelled")
+
+
 def reap_stale_jobs(db: Session, *, running_timeout: int | None = None) -> int:
     """Fail jobs whose worker vanished. Returns how many were reaped."""
     timeout = running_timeout or settings.install_timeout_seconds
@@ -240,4 +287,5 @@ def reap_stale_jobs(db: Session, *, running_timeout: int | None = None) -> int:
             error=f"job exceeded {timeout}s without completing; worker presumed lost",
         )
         log(db, job, "job timed out", level="error", customer_visible=True)
+        release_server(db, job, reason=f"job {job.id} timed out")
     return len(stale)

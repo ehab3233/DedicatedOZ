@@ -363,6 +363,8 @@ export const api = {
 
   job: (id: string) => request<JobDetail>(`/api/v1/jobs/${id}`),
   cancelJob: (id: string) => request<Job>(`/api/v1/jobs/${id}/cancel`, { method: 'POST' }),
+  forceCancelJob: (id: string, reason = 'stuck job') =>
+    request<Job>(`/api/v1/admin/jobs/${id}/force-cancel`, { method: 'POST', body: JSON.stringify({ reason }) }),
 
   osTemplates: () => request<OSTemplate[]>('/api/v1/os-templates'),
   netboot: () => request<NetbootReport>('/api/v1/admin/images/netboot'),

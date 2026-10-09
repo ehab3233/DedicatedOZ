@@ -189,6 +189,18 @@ export function PowerControls({
     }
   }
 
+  async function forceCancelActive() {
+    if (!activeJob) return
+    const ok = await confirm({
+      title: `Force-cancel the ${activeJob.type.replace(/_/g, ' ')} job?`,
+      body: 'Ends it now, even if no worker is running it any more. A reinstall\'s server goes back to active, or to in stock if nobody holds it. Nothing is sent to the server itself.',
+      confirmLabel: 'Force cancel',
+      danger: true,
+    })
+    if (!ok) return
+    await toast.run(async () => { await api.forceCancelJob(activeJob.id); onChanged?.() }, 'Job force-cancelled')
+  }
+
   useEffect(() => () => { followRef.current++ }, [])
 
   const runningLabel = running ? ACTIONS.find((a) => a.action === running.action)?.label : null
@@ -235,6 +247,8 @@ export function PowerControls({
               <button className="link-button danger" onClick={() => run('reset', true)}>reset anyway</button>
               {' · '}
               <button className="link-button danger" onClick={() => run('force_off', true)}>force off anyway</button>
+              {' · '}
+              <button className="link-button danger" onClick={forceCancelActive}>force-cancel the job</button>
             </>
           )}
         </div>

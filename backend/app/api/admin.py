@@ -29,6 +29,7 @@ from app.schemas import (
     AdminJobDetailOut,
     AdminJobLogEntryOut,
     AdminServerOut,
+    ForceCancelRequest,
     IPAssignCreate,
     IPAssignmentOut,
     IPBlockCreate,
@@ -421,6 +422,53 @@ def list_all_jobs(
     if server_id:
         query = query.where(Job.server_id == server_id)
     return list(db.execute(query).scalars().all())
+
+
+@router.post("/jobs/{job_id}/force-cancel", response_model=JobOut)
+def force_cancel_job(
+    job_id: uuid.UUID,
+    request: Request,
+    payload: ForceCancelRequest | None = None,
+    db: Session = Depends(get_db),
+    admin: Customer = Depends(current_admin),
+) -> Job:
+    """End a job now, even when no worker is running it any more.
+
+    For a job stuck in running after its worker was restarted: the ordinary
+    cancel waits for a worker that will never look. An install's server goes
+    back to active (assigned) or in stock (not), so it is unlocked.
+    """
+    job = db.get(Job, job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="job not found")
+    reason = (payload.reason if payload else "stuck job").strip() or "stuck job"
+    try:
+        server_state = job_service.force_cancel(db, job, actor=admin.email, reason=reason)
+    except job_service.IllegalJobTransition as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    record_audit(
+        db,
+        action="job.force_cancelled",
+        actor_type=ActorType.ADMIN,
+        actor_id=admin.id,
+        actor_label=admin.email,
+        target_type="job",
+        target_id=str(job.id),
+        source_ip=client_ip(request),
+        detail={"type": job.type, "reason": reason, "server_state": server_state},
+    )
+    db.commit()
+    # A queued message should not start the job later. Best effort: the job
+    # row is already terminal, and a worker that picks it up skips it.
+    if job.celery_task_id:
+        try:
+            from app.workers.celery_app import celery_app
+
+            celery_app.control.revoke(job.celery_task_id)
+        except Exception:  # noqa: BLE001 - a broker outage must not undo the cancel
+            pass
+    db.refresh(job)
+    return job
 
 
 @router.get("/jobs/{job_id}", response_model=AdminJobDetailOut)

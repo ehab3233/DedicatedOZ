@@ -373,3 +373,72 @@ class TestBootEntry:
         assert "local-hostname: web01" in meta.text
 
         assert client.get(f"/boot/nocloud/{mac}/wrong-sig/user-data").status_code == 403
+
+
+class TestForceCancel:
+    def _install_job(self, db, server, state):
+        from app.enums import ActorType, JobState, JobType
+        from app.services import jobs as job_service
+
+        job, _ = job_service.create_job(
+            db, job_type=JobType.INSTALL, server_id=server.id, requested_by_type=ActorType.ADMIN,
+        )
+        if state != "queued":
+            job_service.transition_job(db, job, JobState.RUNNING)
+        db.commit()
+        return job
+
+    def test_a_running_install_with_no_worker_is_ended_and_the_server_unlocked(
+        self, client, db, make_customer, make_server, auth_header
+    ):
+        admin = make_customer("admin@example.com", admin=True)
+        server = make_server(state=ServerState.PROVISIONING)
+        job = self._install_job(db, server, "running")
+
+        response = client.post(f"/api/v1/admin/jobs/{job.id}/force-cancel",
+                               json={"reason": "worker restarted"}, headers=auth_header(admin))
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["state"] == "cancelled"
+        assert "force-cancelled by admin@example.com: worker restarted" in body["error"]
+        db.refresh(server)
+        assert server.state == ServerState.IN_STOCK  # nobody holds it
+
+        # The server is free for the next job, and the job cannot be cancelled twice.
+        again = client.post(f"/api/v1/admin/jobs/{job.id}/force-cancel", headers=auth_header(admin))
+        assert again.status_code == 409
+
+    def test_an_assigned_server_goes_back_to_active(
+        self, client, db, make_customer, make_server, make_subscription, auth_header
+    ):
+        admin = make_customer("admin@example.com", admin=True)
+        server = make_server(state=ServerState.PROVISIONING)
+        make_subscription(make_customer(), server)
+        job = self._install_job(db, server, "queued")
+        client.post(f"/api/v1/admin/jobs/{job.id}/force-cancel", headers=auth_header(admin))
+        db.refresh(server)
+        assert server.state == ServerState.ACTIVE
+
+    def test_customers_cannot_force_cancel(
+        self, client, db, make_customer, make_server, auth_header
+    ):
+        customer = make_customer()
+        server = make_server(state=ServerState.PROVISIONING)
+        job = self._install_job(db, server, "running")
+        response = client.post(f"/api/v1/admin/jobs/{job.id}/force-cancel",
+                               headers=auth_header(customer))
+        assert response.status_code == 403
+
+    def test_a_failed_install_no_longer_leaves_the_server_in_provisioning(
+        self, db, make_server
+    ):
+        from app.enums import JobState
+        from app.models import Job
+        from app.workers.tasks import _record_failure
+
+        server = make_server(state=ServerState.PROVISIONING)
+        job = self._install_job(db, server, "running")
+        _record_failure(job.id, RuntimeError("installer never called back"))
+        db.expire_all()
+        assert db.get(Job, job.id).state == JobState.FAILED
+        assert db.get(type(server), server.id).state == ServerState.IN_STOCK

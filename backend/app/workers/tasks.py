@@ -91,6 +91,7 @@ def _record_failure(job_uuid: uuid.UUID, exc: BaseException) -> None:
         if cancelled:
             job_service.transition_job(db, job, JobState.CANCELLED)
             job_service.log(db, job, "job cancelled", level="warning", customer_visible=True)
+            job_service.release_server(db, job, reason=f"job {job.id} cancelled")
             return
 
         job_service.transition_job(db, job, JobState.FAILED, error=str(exc) or repr(exc))
@@ -108,6 +109,7 @@ def _record_failure(job_uuid: uuid.UUID, exc: BaseException) -> None:
             response=response if isinstance(response, dict) else None,
             customer_visible=True,
         )
+        job_service.release_server(db, job, reason=f"job {job.id} failed")
 
 
 def _check_cancel(db: Session, job: Job) -> None:

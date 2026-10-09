@@ -470,6 +470,10 @@ class OSTemplateOut(ORMModel):
     default_raid_level: RaidLevel
 
 
+class ForceCancelRequest(BaseModel):
+    reason: str = Field(default="stuck job", min_length=1, max_length=200)
+
+
 class NetbootFileOut(BaseModel):
     role: str
     path: str

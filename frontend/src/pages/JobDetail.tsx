@@ -37,6 +37,16 @@ export default function JobDetail({ isAdmin }: { isAdmin: boolean }) {
     await toast.run(async () => { await api.cancelJob(id); await job.reload() }, 'Cancellation requested')
   }
 
+  async function forceCancel() {
+    if (!(await confirm({
+      title: 'Force-cancel this job?',
+      body: 'Ends the job now, even if no worker is running it any more (a restarted worker leaves jobs stuck like this). A reinstall\'s server goes back to active, or to in stock if nobody holds it, so it is unlocked. If a worker is in fact still running it, that worker stops at its next check. Nothing is sent to the server itself.',
+      confirmLabel: 'Force cancel',
+      danger: true,
+    }))) return
+    await toast.run(async () => { await api.forceCancelJob(id); await job.reload() }, 'Job force-cancelled')
+  }
+
   return (
     <main className="page">
       <PageHeader
@@ -47,6 +57,7 @@ export default function JobDetail({ isAdmin }: { isAdmin: boolean }) {
           <>
             {serverLink && <Link className="button" to={serverLink}>Server</Link>}
             {active && <button className="danger" onClick={cancel}>Cancel job</button>}
+            {active && isAdmin && <button className="danger" onClick={forceCancel} title="End the job now, even if no worker is running it">Force cancel</button>}
           </>
         }
       />
