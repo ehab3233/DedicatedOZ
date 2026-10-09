@@ -13,7 +13,9 @@
 # through virtual media all work that way. Override with environment variables:
 #
 #   DOZ_IP=10.0.0.5            this machine's address (default: auto-detected)
-#   DOZ_PXE=none|proxy|range   none (default) | proxy DHCP | DOZ_DHCP_RANGE=A,B
+#   DOZ_PXE=none|proxy|range|external
+#                              none (default) | proxy DHCP | DOZ_DHCP_RANGE=A,B |
+#                              external: your DHCP server points PXE clients at this VM
 #   DOZ_ADMIN_EMAIL=you@x      admin login (default: admin@example.com)
 #   DOZ_SIM=0                  do not start the BMC simulator
 #   DOZ_BRANCH=<name>          which branch to install (default: the repository's default)
@@ -60,9 +62,10 @@ ARGS=(--src "$SRC" --admin-email "${DOZ_ADMIN_EMAIL:-admin@example.com}")
 case "$PXE" in
     none)  ARGS+=(--no-pxe) ;;
     proxy) ARGS+=(--proxy-dhcp) ;;
+    external) ARGS+=(--external-dhcp) ;;
     range) [ -n "${DOZ_DHCP_RANGE:-}" ] || die "DOZ_PXE=range needs DOZ_DHCP_RANGE=START,END"
            ARGS+=(--dhcp-range "$DOZ_DHCP_RANGE") ;;
-    *) die "DOZ_PXE must be none, proxy or range" ;;
+    *) die "DOZ_PXE must be none, proxy, range or external" ;;
 esac
 
 say "installing the management server"

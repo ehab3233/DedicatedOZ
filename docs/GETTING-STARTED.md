@@ -42,6 +42,10 @@ almost certainly is one.) You then have two options:
 - **Leave it running** and have the management VM only add PXE information to
   its replies (`--proxy-dhcp`). Works, but the installed OS may get a different
   address from the one iPXE got, so client pinning is turned off in this mode.
+- **Your DHCP server is on the servers' VLAN and this VM is not** (a routed
+  network). Keep it, and point its PXE options at this VM (`--external-dhcp`):
+  the VM then only serves TFTP and the boot scripts. Section 2 has the exact
+  options to set.
 
 You cannot run two authoritative DHCP servers on one network. Pick one.
 
@@ -74,9 +78,36 @@ DOZ_PXE=range DOZ_DHCP_RANGE=10.0.0.200,10.0.0.249 \
 DOZ_PXE=proxy curl -fsSL https://raw.githubusercontent.com/ehab3233/DedicatedOZ/HEAD/install.sh | sudo bash
 ```
 
-Netbooting servers on a routed VLAN additionally needs a DHCP relay (an
-"IP helper" on the router) pointing at this VM and a DHCP range for that
-VLAN; ask before you need it, it is a small change to the dnsmasq config.
+**Servers on another VLAN, with their own DHCP server** (a MikroTik, a
+firewall, Windows DHCP): keep that DHCP server and tell it where to send PXE
+clients. Install with `DOZ_PXE=external` (or, on an existing install,
+`sudo /opt/doz-src/doz.sh install --external-dhcp`); the VM then serves TFTP
+and the boot scripts and does no DHCP of its own. On the DHCP server, for
+the servers' subnet, set:
+
+| Option | Value |
+|---|---|
+| next-server (66) | the VM's address |
+| filename (67) | `undionly.kpxe` (`ipxe.efi` for UEFI servers) |
+| filename (67), only for clients whose **user class (77) is `iPXE`** | `http://<VM>/boot/ipxe` |
+
+The second filename is what makes it work: the NIC's PXE ROM fetches iPXE
+over TFTP, iPXE asks DHCP again announcing itself as user class `iPXE`, and
+must then be handed the HTTP URL instead of itself. Without that rule it
+loops on the first filename. On a MikroTik (RouterOS 7):
+
+```
+/ip dhcp-server network set [find] next-server=172.16.100.193 boot-file-name=undionly.kpxe
+/ip dhcp-server option add name=doz-ipxe code=67 value="'http://172.16.100.193/boot/ipxe'"
+/ip dhcp-server option sets add name=doz-ipxe options=doz-ipxe
+/ip dhcp-server matcher add name=doz-ipxe server=dhcp1 code=77 value=iPXE option-set=doz-ipxe
+```
+
+(`dhcp1` is the DHCP server's name in `/ip dhcp-server print`.) The servers'
+VLAN must reach the VM on UDP 69 and TCP 80 and 8080, and the VM must reach
+the CIMCs. `PXE-E53: No boot filename received` on the server's console
+means the first two options are missing; iPXE fetching `undionly.kpxe` a
+second time means the user-class rule is.
 
 The long form, from a checkout, is the same installer with flags:
 

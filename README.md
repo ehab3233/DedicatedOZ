@@ -194,8 +194,9 @@ DOZ_PXE=range DOZ_DHCP_RANGE=10.0.0.200,10.0.0.249 \
 ```
 
 Run the same command again to update. The long form, from a checkout, is
-`sudo ./doz.sh install --ip 10.0.0.5 --no-pxe` (or `--dhcp-range A,B`, or
-`--proxy-dhcp`).
+`sudo ./doz.sh install --ip 10.0.0.5 --no-pxe` (or `--dhcp-range A,B`,
+`--proxy-dhcp`, or `--external-dhcp` when your own DHCP server on the
+servers' VLAN should point PXE clients at this VM).
 
 `doz` is one systemd unit over all the parts, so the usual commands work on
 the whole stack and it starts at boot:

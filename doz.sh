@@ -12,7 +12,7 @@
 # docker compose project means compose, otherwise dev. Override with
 # DOZ_MODE=dev|compose|systemd.
 #
-#   sudo ./doz.sh install --ip IP (--dhcp-range A,B | --proxy-dhcp | --no-pxe)
+#   sudo ./doz.sh install --ip IP (--dhcp-range A,B | --proxy-dhcp | --external-dhcp | --no-pxe)
 #                          install as the `doz` Ubuntu service (see deploy/)
 #   sudo ./doz.sh update   re-run the installer with the saved settings
 #   ./doz.sh up            start everything (systemd: systemctl start doz)

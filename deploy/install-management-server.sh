@@ -23,6 +23,8 @@
 #   sudo ./deploy/install-management-server.sh --ip 10.0.0.5 --no-pxe
 #
 #   --dhcp-range   this VM becomes the DHCP server (nothing else hands out addresses)
+#   --external-dhcp  your DHCP server (on the servers' VLAN) points PXE clients at
+#                  this VM; this VM only serves TFTP and the boot scripts
 #   --proxy-dhcp   your router keeps doing DHCP; this only adds the PXE options
 #   --no-pxe       no DHCP/TFTP at all: panel, power and console only (add PXE later)
 #
@@ -59,6 +61,7 @@ while [ $# -gt 0 ]; do
         --dhcp-range)   PXE_MODE=authoritative; DHCP_RANGE="$2"; shift 2 ;;
         --proxy-dhcp)   PXE_MODE=proxy; DHCP_RANGE=""; shift ;;
         --no-pxe)       PXE_MODE=none; DHCP_RANGE=""; shift ;;
+        --external-dhcp) PXE_MODE=external; DHCP_RANGE=""; shift ;;
         --admin-email)  ADMIN_EMAIL="$2"; shift 2 ;;
         --fetch-images) FETCH_IMAGES=1; shift ;;
         --with-docker)  WITH_DOCKER=1; shift ;;
@@ -79,7 +82,7 @@ as_postgres() { runuser -u postgres -- "$@"; }
 
 [ "$(id -u)" -eq 0 ] || die "run as root (sudo)"
 [ -f "$SRC_DIR/backend/pyproject.toml" ] || die "cannot find the repository at $SRC_DIR (use --src)"
-[ -n "$PXE_MODE" ] || die "first install: choose --dhcp-range START,END, --proxy-dhcp or --no-pxe"
+[ -n "$PXE_MODE" ] || die "first install: choose --dhcp-range START,END, --proxy-dhcp, --external-dhcp or --no-pxe"
 
 . /etc/os-release
 [ "${ID:-}" = ubuntu ] || die "this installer targets Ubuntu (found ${PRETTY_NAME:-unknown})"
@@ -127,6 +130,7 @@ case "$PXE_MODE" in
     authoritative) note "PXE:         this VM is the DHCP server, range $DHCP_RANGE" ;;
     proxy)         note "PXE:         proxy DHCP beside your existing DHCP server" ;;
     none)          note "PXE:         off (panel, power and console only)" ;;
+    external)      note "PXE:         TFTP only; your DHCP server sends PXE clients here" ;;
 esac
 note "install to:  $INSTALL_DIR"
 
@@ -600,7 +604,7 @@ dhcp-boot=tag:!ipxe,tag:!efi64,undionly.kpxe,,${MGMT_IP}
 dhcp-boot=tag:!ipxe,tag:efi64,ipxe.efi,,${MGMT_IP}
 dhcp-boot=tag:ipxe,http://${MGMT_IP}/boot/ipxe
 DNSMASQ
-    else
+    elif [ "$PXE_MODE" = "proxy" ]; then
         cat >> /etc/doz/dnsmasq.conf <<DNSMASQ
 
 # Proxy DHCP: the existing DHCP server keeps handing out addresses; this only
@@ -611,6 +615,14 @@ pxe-service=tag:!ipxe,x86PC,"Boot DedicatedOZ (BIOS)",undionly.kpxe
 pxe-service=tag:!ipxe,X86-64_EFI,"Boot DedicatedOZ (UEFI)",ipxe.efi
 pxe-service=tag:ipxe,x86PC,"DedicatedOZ",http://${MGMT_IP}/boot/ipxe
 pxe-service=tag:ipxe,X86-64_EFI,"DedicatedOZ",http://${MGMT_IP}/boot/ipxe
+DNSMASQ
+    else
+        cat >> /etc/doz/dnsmasq.conf <<DNSMASQ
+
+# External DHCP: no DHCP here at all. The DHCP server on the servers' VLAN
+# hands out next-server=${MGMT_IP} with undionly.kpxe (BIOS) or ipxe.efi
+# (UEFI), and http://${MGMT_IP}/boot/ipxe to clients whose user class
+# (option 77) is "iPXE". This dnsmasq only serves TFTP.
 DNSMASQ
     fi
     /usr/sbin/dnsmasq --test --conf-file=/etc/doz/dnsmasq.conf >/dev/null 2>&1 \
@@ -715,6 +727,24 @@ cat <<SUMMARY
    Both show on the panel's Images page under Netboot images.
    3. docs/GETTING-STARTED.md for CIMC setup and the first server
 SUMMARY
+
+if [ "$PXE_MODE" = "external" ]; then
+cat <<EXTERNAL
+
+ PXE with your own DHCP server: on the DHCP server for the servers' VLAN,
+ for that subnet, set
+   next-server (option 66) = ${MGMT_IP}
+   filename    (option 67) = undionly.kpxe      (ipxe.efi for UEFI servers)
+ and, for clients whose user class (option 77) is "iPXE",
+   filename    (option 67) = http://${MGMT_IP}/boot/ipxe
+ MikroTik RouterOS 7:
+   /ip dhcp-server network set [find] next-server=${MGMT_IP} boot-file-name=undionly.kpxe
+   /ip dhcp-server option add name=doz-ipxe code=67 value="'http://${MGMT_IP}/boot/ipxe'"
+   /ip dhcp-server option sets add name=doz-ipxe options=doz-ipxe
+   /ip dhcp-server matcher add name=doz-ipxe server=<dhcp server name> code=77 value=iPXE option-set=doz-ipxe
+ The servers' VLAN must reach this VM on UDP 69 and TCP 80 and 8080.
+EXTERNAL
+fi
 
 if [ -n "$FAILED" ]; then
     echo
