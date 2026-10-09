@@ -51,6 +51,16 @@ echo No provisioning job for this host. Booting from local disk.
 sanboot --no-describe --drive 0x80 || exit
 """
 
+#: Sent to a server that PXE-boots while its install job is still preparing
+#: the disks (a box with no OS falls through to PXE on every boot, so this
+#: happens whenever the controller is being rebuilt). It asks again shortly.
+BOOT_WAIT_SCRIPT = """#!ipxe
+echo The management server is still preparing the disks for this install.
+echo Asking again in 20 seconds.
+sleep 20
+chain {base}/boot/ipxe?mac={mac} || reboot
+"""
+
 #: Sent when the entry point is hit without a MAC. iPXE expands `${net0/mac}`
 #: itself when it runs this, so DHCP only ever has to hand out a fixed URL --
 #: no reliance on the DHCP server passing `${...}` through untouched.
@@ -140,6 +150,18 @@ def ipxe_entry(
         return PlainTextResponse(BOOT_LOCAL_SCRIPT, media_type="text/plain")
 
     _pin_client(db, job, request)
+    payload = job.payload or {}
+    if not payload.get("_netboot_ready") and not (job.result or {}).get("_handoff"):
+        # The worker has not set the boot flag yet: the disks may be mid-rebuild.
+        job_service.log(
+            db, job, "server PXE-booted before the disks were ready; told it to wait",
+            level="warning",
+        )
+        db.commit()
+        base = settings.control_plane_url.rstrip("/")
+        return PlainTextResponse(
+            BOOT_WAIT_SCRIPT.format(base=base, mac=normalised), media_type="text/plain"
+        )
     script = boot_service.render_ipxe_script(db, server, job)
     if job.type == JobType.INSTALL.value and (job.result or {}).get("_handoff"):
         job_service.set_stage(db, job, "loading the OS installer", progress=55)

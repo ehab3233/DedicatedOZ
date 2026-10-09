@@ -34,8 +34,31 @@ def install_job(db, make_customer, make_server, make_subscription, make_template
         root_password=None,
         customer=customer,
     )
+    # What the worker records once the disks are ready and the PXE flag is
+    # set; before that a PXE boot is told to wait (TestNotReadyYet).
+    job.payload = {**job.payload, "_netboot_ready": True}
     db.commit()
     return server, job, customer
+
+
+class TestNotReadyYet:
+    def test_a_boot_before_the_worker_is_ready_is_told_to_wait(self, client, db, install_job):
+        # A server with no OS falls through to PXE on every boot, so it can
+        # turn up while the controller is still being rebuilt.
+        server, job, _ = install_job
+        job.payload = {k: v for k, v in job.payload.items() if k != "_netboot_ready"}
+        db.commit()
+        script = client.get("/boot/ipxe", params={"mac": server.provisioning_mac}).text
+        assert "still preparing the disks" in script
+        assert "chain http://" in script and f"/boot/ipxe?mac={server.provisioning_mac}" in script
+        assert "doz-installer" not in script
+        db.refresh(job)
+        assert job.progress == 0  # not "installer fetched boot script"
+
+        job.payload = {**job.payload, "_netboot_ready": True}
+        db.commit()
+        script = client.get("/boot/ipxe", params={"mac": server.provisioning_mac}).text
+        assert "doz-installer" in script
 
 
 class TestBootScriptRendering:

@@ -113,6 +113,10 @@ class Settings(BaseSettings):
     # XML API) before the installer boots. Off means the ramdisk does it with
     # StorCLI, if one was built in, or installs to the disks as they are.
     raid_via_bmc: bool = True
+    # A MegaRAID takes its time deleting and creating virtual drives, and a
+    # CIMC answers slowly while its host is booting; the RAID calls wait this
+    # long for an answer and then check the controller's state themselves.
+    raid_bmc_timeout_seconds: int = 180
     # How long a graceful shutdown may take before the job reports that the OS
     # ignored it. It is never escalated to a forced power-off automatically:
     # that is the operator's call, and it is one click away.

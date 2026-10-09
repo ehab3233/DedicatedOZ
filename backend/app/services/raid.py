@@ -13,7 +13,10 @@ that before they get here.
 from __future__ import annotations
 
 import re
+import time
+from collections.abc import Callable
 
+from app.config import settings
 from app.drivers.base import BMCError, LogSink, null_sink
 from app.drivers.cimc import CimcXmlApi
 from app.drivers.factory import credential_for
@@ -145,7 +148,8 @@ def configure(server: Server, level: RaidLevel, *, log: LogSink = null_sink) -> 
     )
 
     def xml_api() -> CimcXmlApi:
-        return CimcXmlApi(host, credential, port=server.redfish_port, log=log)
+        return CimcXmlApi(host, credential, port=server.redfish_port, log=log,
+                          timeout=settings.raid_bmc_timeout_seconds)
 
     try:
         return _configure_redfish(redfish, level, log, xml_api=xml_api)
@@ -180,7 +184,8 @@ def clear(server: Server, *, log: LogSink = null_sink) -> dict:
     except BMCError as exc:
         log(f"Redfish could not delete the virtual drives ({exc}); trying the CIMC XML API",
             level="warning")
-    with CimcXmlApi(host, credential, port=server.redfish_port, log=log) as api:
+    with CimcXmlApi(host, credential, port=server.redfish_port, log=log,
+                    timeout=settings.raid_bmc_timeout_seconds) as api:
         deleted = 0
         for controller in api.storage_controllers():
             for vd in api.virtual_drives(controller["dn"]):
@@ -287,7 +292,21 @@ def _configure_xml(api: CimcXmlApi, level: RaidLevel, log: LogSink) -> dict:
     log(f"RAID controller (XML API): {controller.get('id')} {controller.get('model') or ''}")
     for vd in api.virtual_drives(dn):
         log(f"deleting virtual drive {vd.get('name')}")
-        api.delete_virtual_drive(vd["dn"])
+        try:
+            api.delete_virtual_drive(vd["dn"])
+        except BMCError as exc:
+            if "timed out" not in str(exc).lower():
+                raise
+            log(f"the CIMC did not answer the delete in time ({exc}); checking whether it "
+                "happened", level="warning")
+            gone = _settle(
+                lambda vd_dn=vd["dn"]: all(v["dn"] != vd_dn for v in api.virtual_drives(dn)),
+                log=log, what="the virtual drive to disappear",
+            )
+            if not gone:
+                raise BMCError(f"virtual drive {vd.get('name')} is still there after the "
+                               "delete timed out") from exc
+        log(f"virtual drive {vd.get('name')} deleted")
 
     def list_disks() -> list[dict[str, str]]:
         found = api.local_disks(dn)
@@ -342,20 +361,31 @@ def _configure_xml(api: CimcXmlApi, level: RaidLevel, log: LogSink) -> dict:
     # exactly 952720 MB). A firmware that still objects gets 98%.
     size_mb = capacity // 1_048_576
     log(f"building {describe(level, members, capacity)}")
+    def find_built() -> dict | None:
+        return next((v for v in api.virtual_drives(dn) if v.get("name") == VOLUME_NAME), None)
+
     try:
         api.create_virtual_drive(
             dn, name=VOLUME_NAME, raid_level=XML_LEVEL[level], drive_groups=groups,
             size=f"{size_mb} MB",
         )
     except BMCError as exc:
-        if "size" not in str(exc).lower():
+        text = str(exc).lower()
+        if "timed out" in text:
+            log(f"the CIMC did not answer the create in time ({exc}); checking whether it "
+                "happened", level="warning")
+            if not _settle(lambda: find_built() is not None, log=log,
+                           what="the virtual drive to appear"):
+                raise BMCError("no virtual drive appeared after the create timed out") from exc
+        elif "size" in text:
+            log(f"the CIMC rejected {size_mb} MB ({exc}); retrying at 98%", level="warning")
+            api.create_virtual_drive(
+                dn, name=VOLUME_NAME, raid_level=XML_LEVEL[level], drive_groups=groups,
+                size=f"{int(size_mb * 0.98)} MB",
+            )
+        else:
             raise
-        log(f"the CIMC rejected {size_mb} MB ({exc}); retrying at 98%", level="warning")
-        api.create_virtual_drive(
-            dn, name=VOLUME_NAME, raid_level=XML_LEVEL[level], drive_groups=groups,
-            size=f"{int(size_mb * 0.98)} MB",
-        )
-    built = next((v for v in api.virtual_drives(dn) if v.get("name") == VOLUME_NAME), None)
+    built = find_built()
     if built is None:
         raise BMCError("the CIMC accepted the request but lists no virtual drive afterwards")
     try:
@@ -367,6 +397,23 @@ def _configure_xml(api: CimcXmlApi, level: RaidLevel, log: LogSink) -> dict:
         "drives": [d["name"] for d in members], "volume": VOLUME_NAME,
         "capacity_bytes": capacity, "description": describe(level, members, capacity),
     }
+
+
+def _settle(check: Callable[[], bool], *, log: LogSink, what: str, timeout: int = 120) -> bool:
+    """Wait for the controller to reflect `what`, polling the CIMC.
+
+    A delete or create that timed out on the wire may well have happened:
+    the controller works on, and the CIMC answers when it is done.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            if check():
+                return True
+        except BMCError as exc:
+            log(f"while waiting for {what}: {exc}", level="warning")
+        time.sleep(5)
+    return False
 
 
 def _parse_size(text: str) -> int:

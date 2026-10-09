@@ -665,6 +665,10 @@ def _netboot_into_ramdisk(db: Session, job: Job, server: Server, driver) -> None
             "and sudo /opt/doz/doz.sh ramdisk (the Images page lists what is missing)"
         )
 
+    # From here a PXE boot gets the real boot script; before this it is told
+    # to wait, because the disks may still be being rebuilt.
+    job.payload = {**(job.payload or {}), "_netboot_ready": True}
+    db.add(job)
     job_service.set_stage(db, job, "setting one-time PXE boot", progress=5)
     db.commit()
     driver.set_boot_once("pxe")
