@@ -566,6 +566,11 @@ if [ "$PXE_MODE" != "none" ]; then
         fi
     done
     chown -R doz:doz "$TFTP"
+    # dnsmasq drops to its own user and refuses to start ("TFTP directory
+    # inaccessible") unless it can walk the whole path; a strict umask on
+    # the first install would otherwise leave /opt/doz unreadable to it.
+    chmod 755 "$INSTALL_DIR" "$INSTALL_DIR/installer" "$TFTP"
+    chmod -R a+rX "$TFTP"
     DNSMASQ_USER=nobody
     id dnsmasq >/dev/null 2>&1 && DNSMASQ_USER=dnsmasq
 
