@@ -75,6 +75,7 @@ def get_server(
     detail = ServerDetailOut.model_validate(server)
     spec = server.hardware_spec or {}
     detail.drives = spec.get("drives", [])
+    detail.volumes = spec.get("volumes", [])
     detail.nics = [
         # The BMC's own MAC list is not customer business beyond what is on
         # their machine; interface names and speeds are.

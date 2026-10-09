@@ -437,7 +437,8 @@ What you should see, in order, over about fifteen to twenty minutes:
 | power cycling into installer | job log | BMC did not power the box — check the raw log |
 | installer fetched boot script | job log, 20% | Never arrives → DHCP/TFTP/iPXE. `journalctl -u dnsmasq`, serial console |
 | installer booted | ramdisk callback, 25% | Ramdisk loaded but cannot reach `http://10.0.0.5` — is the data NIC on the same network as the VM? |
-| preparing storage / building array | 25–45% | StorCLI — bench test 5 |
+| building raid1 through the BMC | 3% | The BMC could not build the array: the job log shows what the CIMC said. Hardware tab → Configure RAID runs the same step on its own |
+| preparing storage | 25–45% | The ramdisk wipes the array the BMC built (no StorCLI needed) |
 | rebooting into the OS installer | 50% | The ramdisk has prepared the disks and reboots; the next PXE boot loads Ubuntu's own installer. If the box comes back into the ramdisk instead, the one-time PXE flag was not set (job log) |
 | the OS installer boots | serial and KVM | Ubuntu's installer runs with the answer file; its own messages show on the console from here |
 | Ubuntu 22.04 installed | callback | The installer's late-command reported back |

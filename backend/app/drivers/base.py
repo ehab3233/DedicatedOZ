@@ -71,6 +71,8 @@ class HardwareInventory:
     nics: list[dict] = field(default_factory=list)
     #: [{"name": ..., "capacity_gb": ..., "media": ..., "serial": ...}]
     drives: list[dict] = field(default_factory=list)
+    #: Virtual drives on the RAID controller: [{"name", "raid_type", "capacity_gb", ...}]
+    volumes: list[dict] = field(default_factory=list)
     raw: dict = field(default_factory=dict)
 
 

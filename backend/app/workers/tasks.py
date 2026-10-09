@@ -23,9 +23,10 @@ from app.drivers.cimc import CimcXmlApi
 from app.drivers.factory import credential_for
 from app.drivers.fallback import FallbackDriver, protocol_label
 from app.drivers.redfish import RedfishDriver
-from app.enums import ActorType, JobState, JobType, PowerAction, ServerState
+from app.enums import ActorType, JobState, JobType, PowerAction, RaidLevel, ServerState
 from app.models import Image, Job, OSTemplate, Server
-from app.services import boot_assets, images
+from app.secrets import SecretNotFoundError
+from app.services import boot_assets, images, raid
 from app.services import jobs as job_service
 from app.services.dispatch import enqueue
 from app.services.lifecycle import IllegalTransition, transition_server
@@ -578,6 +579,71 @@ def image_fetch_task(self, job_id: str) -> dict:  # noqa: ANN001
 # ---------------------------------------------------------------------------
 
 
+def _build_raid_for_install(db: Session, job: Job, server: Server, sink: LogSink) -> None:
+    """Build the requested array through the BMC before the installer boots.
+
+    The ramdisk then finds one virtual drive and installs onto it. A level
+    the BMC cannot deliver fails the job: silently installing to bare disks
+    when RAID 1 was asked for is worse than stopping.
+    """
+    level = RaidLevel((job.payload or {}).get("raid_level") or "none")
+    if level is RaidLevel.NONE or not settings.raid_via_bmc:
+        return
+    job_service.set_stage(db, job, f"building {level.value} through the BMC", progress=3)
+    db.commit()
+    try:
+        summary = raid.configure(server, level, log=sink)
+    except (raid.RaidError, BMCError, SecretNotFoundError, ValueError) as exc:
+        raise RuntimeError(
+            f"RAID could not be built through the BMC: {exc}. Choose RAID 'none' to "
+            "install onto the disks as they are."
+        ) from exc
+    payload = dict(job.payload or {})
+    payload["_raid_configured"] = summary
+    job.payload = payload
+    db.add(job)
+    job_service.log(db, job, f"array built through the BMC: {summary['description']}",
+                    customer_visible=True)
+    db.commit()
+
+
+@celery_app.task(name="doz.provision.raid_configure", bind=True, max_retries=0)
+def raid_configure_task(self, job_id: str) -> dict:  # noqa: ANN001
+    """Build one virtual drive of the requested level, or clear them all,
+    through the BMC, then re-read the inventory so the panel shows it."""
+    with job_runner(job_id) as ctx:
+        if ctx is None:
+            return {"skipped": True}
+        db, job, server = ctx
+        if server is None:
+            raise RuntimeError("RAID job has no server")
+        level = RaidLevel((job.payload or {}).get("level") or "none")
+        sink = job_service.make_log_sink(db, job)
+        if level is RaidLevel.NONE:
+            job_service.set_stage(db, job, "deleting every virtual drive", progress=20)
+            db.commit()
+            summary = raid.clear(server, log=sink)
+        else:
+            job_service.set_stage(db, job, f"building {level.value} through the BMC", progress=20)
+            db.commit()
+            try:
+                summary = raid.configure(server, level, log=sink)
+            except raid.RaidError as exc:
+                raise RuntimeError(str(exc)) from exc
+        job_service.log(db, job, summary["description"], customer_visible=True)
+        job_service.set_stage(db, job, "re-reading the inventory", progress=80)
+        db.commit()
+        try:
+            _sync_inventory(db, server, sink)
+        except BMCError as exc:
+            job_service.log(db, job, f"inventory re-read failed: {exc}", level="warning")
+        job.result = summary
+        job_service.set_stage(db, job, summary["description"][:64], progress=100)
+        db.commit()
+        return summary
+    return {"skipped": True}
+
+
 def _netboot_into_ramdisk(db: Session, job: Job, server: Server, driver) -> None:  # noqa: ANN001
     """Shared front half of install / rescue / wipe.
 
@@ -655,6 +721,8 @@ def install_task(self, job_id: str) -> dict:  # noqa: ANN001
         db.commit()
 
         sink = job_service.make_log_sink(db, job)
+        _build_raid_for_install(db, job, server, sink)
+        _check_cancel(db, job)
         with get_driver(server, log=sink) as driver:
             _netboot_into_ramdisk(db, job, server, driver)
             _check_cancel(db, job)
@@ -790,6 +858,7 @@ def _sync_inventory(db: Session, server: Server, sink: LogSink = null_sink) -> d
         "model": inv.model,
         "nics": inv.nics,
         "drives": inv.drives,
+        "volumes": inv.volumes,
         "synced_at": datetime.now(UTC).isoformat(),
     }
     if inv.model:
@@ -970,6 +1039,7 @@ TASK_FOR_JOB_TYPE: dict[JobType, Callable] = {
     JobType.VMEDIA_BOOT: vmedia_task,
     JobType.VMEDIA_EJECT: vmedia_task,
     JobType.IMAGE_FETCH: image_fetch_task,
+    JobType.RAID_CONFIGURE: raid_configure_task,
     JobType.INSTALL: install_task,
     JobType.RESCUE: rescue_task,
     JobType.WIPE: wipe_task,

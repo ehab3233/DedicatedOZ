@@ -206,6 +206,7 @@ class ServerOut(ORMModel):
 
 class ServerDetailOut(ServerOut):
     drives: list[dict] = Field(default_factory=list)
+    volumes: list[dict] = Field(default_factory=list)
     nics: list[dict] = Field(default_factory=list)
     ip_addresses: list[IPAssignmentOut] = Field(default_factory=list)
     health: ServerHealthOut | None = None
@@ -312,6 +313,13 @@ class PowerStateOut(BaseModel):
 
 BOOT_DEVICES = ("pxe", "disk", "cdrom", "bios")
 BOOT_FOLLOW_UPS = ("none", "reset", "cycle", "on")
+
+
+class RaidConfigureRequest(BaseModel):
+    """Build one virtual drive of this level through the BMC; none deletes them all."""
+
+    level: RaidLevel
+    confirm_data_loss: bool = False
 
 
 class BootOverrideRequest(BaseModel):

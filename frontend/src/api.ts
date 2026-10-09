@@ -98,6 +98,7 @@ export interface IPAssignment {
 
 export interface ServerDetail extends Server {
   drives: Array<Record<string, unknown>>
+  volumes: Array<Record<string, unknown>>
   nics: Array<Record<string, unknown>>
   ip_addresses: IPAssignment[]
   health: {
@@ -489,6 +490,11 @@ export const api = {
       `/api/v1/admin/servers/${id}/bmc/password`,
       { method: 'POST', body: JSON.stringify(password ? { password } : {}) },
     ),
+  configureRaid: (id: string, level: string) =>
+    request<Job>(`/api/v1/admin/servers/${id}/raid`, {
+      method: 'POST',
+      body: JSON.stringify({ level, confirm_data_loss: true }),
+    }),
   bootOverride: (id: string, device: BootDevice, then: BootFollowUp) =>
     request<Job>(`/api/v1/admin/servers/${id}/boot`, {
       method: 'POST',

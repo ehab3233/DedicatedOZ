@@ -109,6 +109,10 @@ class Settings(BaseSettings):
     image_dir: str = ""
 
     # --- provisioning ------------------------------------------------------
+    # Build the requested RAID level through the BMC (Redfish, then the CIMC
+    # XML API) before the installer boots. Off means the ramdisk does it with
+    # StorCLI, if one was built in, or installs to the disks as they are.
+    raid_via_bmc: bool = True
     # How long a graceful shutdown may take before the job reports that the OS
     # ignored it. It is never escalated to a forced power-off automatically:
     # that is the operator's call, and it is one click away.

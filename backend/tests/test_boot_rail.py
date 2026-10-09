@@ -276,6 +276,22 @@ class TestInstallerCallbacks:
         assert "_installer_status" not in body["result"]
 
 
+class TestRaidByBmc:
+    def test_ramdisk_skips_storcli_when_the_bmc_built_the_array(self, db, install_job):
+        server, job, _ = install_job
+        before = boot_service.render_provision_script(db, server, job)
+        assert "build_array" in before.split("do_install()")[1]
+
+        job.payload = {**job.payload, "_raid_configured": {
+            "description": "RAID1 over 2 drives (Disk 1, Disk 2), 999 GB", "via": "redfish",
+        }}
+        db.commit()
+        after = boot_service.render_provision_script(db, server, job)
+        body = after.split("do_install()")[1].split("install_os()")[0]
+        assert "array built through the BMC before this boot: RAID1 over 2 drives" in body
+        assert "build_array" not in body
+
+
 class TestHandoff:
     """An install boots twice: the ramdisk, then the distribution's installer."""
 

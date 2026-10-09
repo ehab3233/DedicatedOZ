@@ -260,6 +260,109 @@ class TestPrepareObjects:
         assert changed and attrs["vpLOMPortsAllState"] == "Enabled"
 
 
+class TestRaidOverXmlApi:
+    @responses.activate
+    def test_virtual_drive_create_sends_the_creator_object(self):
+        _login_ok(responses)
+        responses.add(responses.POST, NUOVA, body=(
+            '<configConfMo response="yes"><outConfig>'
+            '<storageVirtualDriveCreatorUsingUnusedPhysicalDrive '
+            'dn="sys/rack-unit-1/board/storage-SAS-MRAID/virtual-drive-create" '
+            'adminState="triggered"/></outConfig></configConfMo>'
+        ))
+        _logout_ok(responses)
+        with CimcXmlApi(HOST, CRED) as api:
+            api.create_virtual_drive(
+                "sys/rack-unit-1/board/storage-SAS-MRAID", name="doz", raid_level=10,
+                drive_groups=[[1, 2], [3, 4]], size="1830000 MB",
+            )
+        body = responses.calls[1].request.body.decode()
+        assert ('<storageVirtualDriveCreatorUsingUnusedPhysicalDrive '
+                'dn="sys/rack-unit-1/board/storage-SAS-MRAID/virtual-drive-create" '
+                'virtualDriveName="doz" raidLevel="10" driveGroup="[1,2][3,4]" '
+                'size="1830000 MB" adminState="trigger" />') in body
+
+    @responses.activate
+    def test_prepare_resets_a_custom_ipmi_encryption_key(self):
+        # A custom key makes every IPMI session fail with the wrong-password
+        # message; the platform never sends a key, so Prepare zeroes it.
+        _login_ok(responses)
+        responses.add(responses.POST, NUOVA, body=(
+            '<configResolveDn response="yes"><outConfig><commIpmiLan '
+            'dn="sys/svc-ext/ipmi-lan-svc" adminState="enabled" priv="admin" '
+            'key="ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12"/></outConfig></configResolveDn>'
+        ))
+        responses.add(responses.POST, NUOVA, body=(
+            '<configConfMo response="yes"><outConfig><commIpmiLan '
+            'dn="sys/svc-ext/ipmi-lan-svc" adminState="enabled" priv="admin" '
+            'key="0000000000000000000000000000000000000000"/></outConfig></configConfMo>'
+        ))
+        _logout_ok(responses)
+        with CimcXmlApi(HOST, CRED) as api:
+            changed, attrs = api.enable_ipmi_over_lan()
+        assert changed and attrs["key"] == "0" * 40
+        assert 'key="0000000000000000000000000000000000000000"' in (
+            responses.calls[2].request.body.decode()
+        )
+
+
+class TestRaidPlanning:
+    def _drive(self, name, cap, media="HDD", **extra):
+        return {"name": name, "path": f"/d/{name}", "capacity_bytes": cap, "media": media,
+                "health": "OK", "state": "Enabled", **extra}
+
+    def test_raid1_picks_two_matching_drives_and_skips_the_sick_one(self):
+        from app.services import raid
+
+        drives = [
+            self._drive("ssd", 480_000_000_000, "SSD"),
+            self._drive("a", 1_000_000_000_000),
+            self._drive("b", 1_000_000_000_000, failure_predicted=True),
+            self._drive("c", 1_000_000_000_000),
+        ]
+        chosen = raid.choose_drives(raid.RaidLevel.RAID1, drives)
+        assert [d["name"] for d in chosen] == ["a", "c"]
+        assert raid.usable_capacity(raid.RaidLevel.RAID1, [1_000, 1_000]) == 1_000
+        assert raid.usable_capacity(raid.RaidLevel.RAID5, [1_000, 1_000, 900]) == 1_800
+        assert raid.usable_capacity(raid.RaidLevel.RAID10, [10, 10, 10, 10]) == 20
+
+    def test_too_few_drives_is_a_clear_error(self):
+        from app.services import raid
+
+        with pytest.raises(raid.RaidError, match="raid5 needs 3 drives; 2 usable of 2"):
+            raid.choose_drives(raid.RaidLevel.RAID5,
+                               [self._drive("a", 10), self._drive("b", 10)])
+
+    def test_raid10_takes_an_even_number(self):
+        from app.services import raid
+
+        drives = [self._drive(n, 10) for n in "abcde"]
+        assert len(raid.choose_drives(raid.RaidLevel.RAID10, drives)) == 4
+
+    def test_cimc_sizes_parse(self):
+        from app.services.raid import _parse_size
+
+        assert _parse_size("952720 MB") == 952720 * 1024 ** 2
+        assert _parse_size("1.8 TB") == int(1.8 * 1024 ** 4)
+        assert _parse_size("n/a") == 0
+
+
+class TestRaidEndpoint:
+    def test_queues_a_raid_job_only_with_confirmation(self, client, make_customer, make_server,
+                                                       auth_header, dispatched):
+        admin = make_customer("admin@example.com", admin=True)
+        server = make_server()
+        refused = client.post(f"/api/v1/admin/servers/{server.id}/raid",
+                              json={"level": "raid1"}, headers=auth_header(admin))
+        assert refused.status_code == 400
+        queued = client.post(f"/api/v1/admin/servers/{server.id}/raid",
+                             json={"level": "raid1", "confirm_data_loss": True},
+                             headers=auth_header(admin))
+        assert queued.status_code == 202, queued.text
+        assert queued.json()["type"] == "raid_configure"
+        assert dispatched == [queued.json()["id"]]
+
+
 class TestKvmTokensUnsupported:
     @responses.activate
     def test_old_firmware_without_the_token_method_is_not_an_error(self):

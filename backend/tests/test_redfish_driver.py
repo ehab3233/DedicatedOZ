@@ -506,3 +506,108 @@ class TestHealth:
         health = driver().health()
         assert health.status == "critical"
         assert health.subsystems["power_supplies"]["status"] == "critical"
+
+
+class TestRaid:
+    """Building a virtual drive through the CIMC's Redfish storage model."""
+
+    STORAGE = f"{SYSTEM}/Storage"
+    MRAID = f"{SYSTEM}/Storage/MRAID"
+
+    def _controller(self, volumes: list[str]) -> None:
+        # No SessionService on this build: the driver falls back to basic auth.
+        responses.add(responses.POST, f"{BASE}/redfish/v1/SessionService/Sessions", status=404)
+        register_common(responses, system={
+            **system_body(), "Storage": {"@odata.id": self.STORAGE},
+        })
+        responses.add(responses.GET, f"{BASE}{self.STORAGE}",
+                      json={"Members": [{"@odata.id": self.MRAID}]})
+        responses.add(responses.GET, f"{BASE}{self.MRAID}", json={
+            "@odata.id": self.MRAID, "Id": "MRAID", "Name": "MRAID",
+            "StorageControllers": [{
+                "Name": "Cisco 12G SAS Modular Raid Controller",
+                "Model": "UCSC-MRAID12G", "SupportedRAIDTypes": ["RAID0", "RAID1", "RAID5"],
+            }],
+            "Drives": [{"@odata.id": f"{self.MRAID}/Drives/{i}"} for i in (1, 2, 3)],
+            "Volumes": {"@odata.id": f"{self.MRAID}/Volumes"},
+        })
+        for i, (cap, media) in enumerate(((1_000_204_886_016, "HDD"), (1_000_204_886_016, "HDD"),
+                                          (480_103_981_056, "SSD")), start=1):
+            responses.add(responses.GET, f"{BASE}{self.MRAID}/Drives/{i}", json={
+                "@odata.id": f"{self.MRAID}/Drives/{i}", "Id": str(i), "Name": f"Disk {i}",
+                "CapacityBytes": cap, "MediaType": media, "Protocol": "SAS",
+                "SerialNumber": f"SN{i}", "Model": "ST1000", "FailurePredicted": False,
+                "Status": {"Health": "OK", "State": "Enabled"},
+                "Oem": {"Cisco": {"DriveState": "UnconfiguredGood"}},
+            })
+        members = [{"@odata.id": f"{self.MRAID}/Volumes/{v}"} for v in volumes]
+        responses.add(responses.GET, f"{BASE}{self.MRAID}/Volumes", json={"Members": members})
+        for v in volumes:
+            responses.add(responses.GET, f"{BASE}{self.MRAID}/Volumes/{v}", json={
+                "@odata.id": f"{self.MRAID}/Volumes/{v}", "Id": v, "Name": v,
+                "RAIDType": "RAID1", "CapacityBytes": 999_000_000_000,
+                "Status": {"Health": "OK"},
+            })
+
+    @responses.activate
+    def test_storage_lists_controllers_drives_and_volumes(self):
+        self._controller(volumes=["old"])
+        controllers = driver().storage()
+        assert len(controllers) == 1
+        c = controllers[0]
+        assert c["name"] == "Cisco 12G SAS Modular Raid Controller"
+        assert c["raid_types"] == ["RAID0", "RAID1", "RAID5"]
+        assert [d["name"] for d in c["drives"]] == ["Disk 1", "Disk 2", "Disk 3"]
+        assert c["drives"][0]["oem_state"] == "UnconfiguredGood"
+        assert c["volumes"][0]["name"] == "old" and c["volumes"][0]["raid_type"] == "RAID1"
+
+    @responses.activate
+    def test_create_volume_posts_the_drives_and_waits_for_the_task(self):
+        self._controller(volumes=[])
+        responses.add(
+            responses.POST, f"{BASE}{self.MRAID}/Volumes", status=202,
+            headers={"Location": "/redfish/v1/TaskService/Tasks/7"},
+        )
+        responses.add(responses.GET, f"{BASE}/redfish/v1/TaskService/Tasks/7",
+                      json={"TaskState": "Running"})
+        responses.add(responses.GET, f"{BASE}/redfish/v1/TaskService/Tasks/7",
+                      json={"TaskState": "Completed"})
+        d = driver()
+        controller = d.storage()[0]
+        d.create_volume(
+            controller, raid_type="RAID1", name="doz",
+            drive_paths=[f"{self.MRAID}/Drives/1", f"{self.MRAID}/Drives/2"],
+        )
+        post = next(c for c in responses.calls if c.request.method == "POST"
+                    and c.request.url.endswith("/Volumes"))
+        body = json.loads(post.request.body)
+        assert body == {
+            "Name": "doz", "RAIDType": "RAID1",
+            "Drives": [{"@odata.id": f"{self.MRAID}/Drives/1"},
+                       {"@odata.id": f"{self.MRAID}/Drives/2"}],
+        }
+        assert sum(1 for c in responses.calls if "Tasks/7" in c.request.url) == 2
+
+    @responses.activate
+    def test_a_failed_task_is_an_error_with_the_bmcs_reason(self):
+        self._controller(volumes=[])
+        responses.add(
+            responses.POST, f"{BASE}{self.MRAID}/Volumes", status=202,
+            headers={"Location": "/redfish/v1/TaskService/Tasks/8"},
+        )
+        responses.add(responses.GET, f"{BASE}/redfish/v1/TaskService/Tasks/8", json={
+            "TaskState": "Exception",
+            "Messages": [], "@Message.ExtendedInfo": [{"Message": "Drive 2 is not available"}],
+        })
+        d = driver()
+        with pytest.raises(BMCError, match="Exception: Drive 2 is not available"):
+            d.create_volume(d.storage()[0], raid_type="RAID1", name="doz",
+                            drive_paths=[f"{self.MRAID}/Drives/1", f"{self.MRAID}/Drives/2"])
+
+    @responses.activate
+    def test_delete_volume(self):
+        self._controller(volumes=["old"])
+        responses.add(responses.DELETE, f"{BASE}{self.MRAID}/Volumes/old", status=204)
+        d = driver()
+        d.delete_volume(d.storage()[0]["volumes"][0]["path"])
+        assert any(c.request.method == "DELETE" for c in responses.calls)

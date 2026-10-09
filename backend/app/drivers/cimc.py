@@ -253,7 +253,60 @@ class CimcXmlApi:
     # Each returns (changed, attributes): see `ensure`.
 
     def enable_ipmi_over_lan(self) -> tuple[bool, dict[str, str]]:
-        return self.ensure(IPMI_LAN_DN, "commIpmiLan", adminState="enabled", priv="admin")
+        # The encryption key is forced to the all-zeros default: ipmitool is
+        # not given one, and a CIMC with a custom key refuses every session
+        # with the same message as a wrong password.
+        return self.ensure(
+            IPMI_LAN_DN, "commIpmiLan", adminState="enabled", priv="admin", key="0" * 40
+        )
+
+    # -- RAID through the CIMC (fallback for firmware without Redfish volumes) --
+
+    def storage_controllers(self) -> list[dict[str, str]]:
+        return self.resolve_class("storageController")
+
+    def local_disks(self, controller_dn: str) -> list[dict[str, str]]:
+        return [d for d in self.resolve_class("storageLocalDisk")
+                if d.get("dn", "").startswith(controller_dn + "/")]
+
+    def virtual_drives(self, controller_dn: str) -> list[dict[str, str]]:
+        return [v for v in self.resolve_class("storageVirtualDrive")
+                if v.get("dn", "").startswith(controller_dn + "/")]
+
+    def delete_virtual_drive(self, dn: str) -> dict[str, str]:
+        return self.configure(dn, "storageVirtualDrive", adminAction="delete-virtual-drive")
+
+    def make_unconfigured_good(self, dn: str) -> dict[str, str]:
+        return self.configure(dn, "storageLocalDisk", adminAction="make-unconfigured-good")
+
+    def set_boot_drive(self, dn: str) -> dict[str, str]:
+        return self.configure(dn, "storageVirtualDrive", adminAction="set-boot-drive")
+
+    def create_virtual_drive(
+        self,
+        controller_dn: str,
+        *,
+        name: str,
+        raid_level: int,
+        drive_groups: list[list[int]],
+        size: str,
+    ) -> dict[str, str]:
+        """Build a virtual drive from unconfigured-good disks.
+
+        `drive_groups` is [[1, 2]] for RAID 0/1/5/6 and [[1, 2], [3, 4]] for
+        RAID 10; `size` is "<n> MB". These are the attributes Cisco's imcsdk
+        sends for the same object.
+        """
+        group = "".join("[" + ",".join(str(i) for i in g) + "]" for g in drive_groups)
+        return self.configure(
+            f"{controller_dn}/virtual-drive-create",
+            "storageVirtualDriveCreatorUsingUnusedPhysicalDrive",
+            virtualDriveName=name,
+            raidLevel=str(raid_level),
+            driveGroup=group,
+            size=size,
+            adminState="trigger",
+        )
 
     def enable_sol(
         self, *, speed: str = "115200", comport: str = "com0"

@@ -78,6 +78,8 @@ class JobType(enum.StrEnum):
     VMEDIA_EJECT = "vmedia_eject"
     #: Download an ISO into the image store on the management server.
     IMAGE_FETCH = "image_fetch"
+    #: Build (or clear) a RAID virtual drive through the BMC.
+    RAID_CONFIGURE = "raid_configure"
     INSTALL = "install"
     RESCUE = "rescue"
     WIPE = "wipe"

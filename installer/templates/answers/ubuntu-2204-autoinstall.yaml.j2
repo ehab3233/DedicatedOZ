@@ -2,8 +2,8 @@
 # Ubuntu autoinstall for {{ server.serial }} / job {{ job.id }}
 #
 # Served per MAC by the control plane. The RAID array already exists by the
-# time this runs -- the ramdisk built it -- so storage config just consumes
-# /dev/sda as a single device.
+# time this runs -- the BMC built it before the installer booted -- so the
+# storage config just takes the largest disk it sees as a single device.
 autoinstall:
   version: 1
 
@@ -32,8 +32,12 @@ autoinstall:
   storage:
     layout:
       name: direct
+      # The virtual drive the BMC built is the biggest block device the
+      # installer can see; the CIMC's virtual media, if any, is far smaller.
+      # Matching by path (/dev/sda) depended on the RAID controller having
+      # exactly one array and enumerating first, which it did not always.
       match:
-        path: /dev/sda
+        size: largest
 
 {% if network.configured %}
   network:

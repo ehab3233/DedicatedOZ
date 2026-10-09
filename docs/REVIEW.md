@@ -231,6 +231,19 @@ else.
    unproven: `igb` for the LOM ports and `megaraid_sas` for the RAID card
    are the two drivers that matter.
 
+4b. **RAID is built through the BMC, not StorCLI.** The ramdisk's StorCLI
+   path needed a binary Broadcom does not let anyone redistribute, so a
+   fresh install had no RAID and Ubuntu's installer, told to use /dev/sda,
+   found no such disk. Before the installer boots, the worker now asks the
+   CIMC to delete every virtual drive and build the requested level from
+   the healthy drives (Redfish Storage/Volumes first, the XML API's
+   storageVirtualDriveCreatorUsingUnusedPhysicalDrive as the fallback),
+   and the Hardware tab's Configure RAID does the same on its own. The
+   answer file takes the largest disk rather than /dev/sda. The request
+   shapes are tested against recorded Redfish and XML exchanges, not a
+   real MegaRAID: the first run on the C220 M4 is the proof, and the job
+   log carries the CIMC's replies if it objects.
+
 5. **The hand-off to the distribution installer is a second PXE boot, not
    kexec.** On the C220 M4 the ramdisk ran to the kexec step and stopped:
    Alpine's kernel ships with `kexec_load` disabled and no `kexec_file_load`,

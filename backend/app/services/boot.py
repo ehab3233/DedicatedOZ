@@ -181,6 +181,8 @@ def install_context(db: Session, server: Server, job: Job) -> dict:
         "raid": {
             "level": payload.get("raid_level", "raid1"),
             "wipe": payload.get("wipe_disks", True),
+            # Set by the worker when the BMC built the array before this boot.
+            "configured_by_bmc": (payload.get("_raid_configured") or {}).get("description"),
         },
         "network": build_network_context(db, server),
         "ssh_keys": payload.get("ssh_keys") or collect_ssh_keys(db, server),

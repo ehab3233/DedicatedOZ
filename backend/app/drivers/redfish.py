@@ -124,6 +124,8 @@ class RedfishDriver(BMCDriver):
         # through any HTTPS_PROXY it finds. Found by running against a real
         # Redfish service from a host with a proxy configured.
         self._session.trust_env = False
+        self._last_status: int = 0
+        self._last_headers: dict[str, str] = {}
         self._session.verify = self._verify
         self._session.headers.update({"Accept": "application/json", "OData-Version": "4.0"})
         self._system_path = system_path
@@ -253,6 +255,8 @@ class RedfishDriver(BMCDriver):
                     request=req_record,
                     response=resp_record,
                 )
+                self._last_status = resp.status_code
+                self._last_headers = dict(resp.headers)
                 return body if isinstance(body, dict) else {"_body": body}
 
             # 401 is terminal: the wrong password will not become right.
@@ -568,7 +572,7 @@ class RedfishDriver(BMCDriver):
             self._log("could not read Manager firmware version", level="warning")
 
         inv.nics = self._collect_nics(system)
-        inv.drives = self._collect_drives(system)
+        inv.drives, inv.volumes = self._collect_storage(system)
         return inv
 
     def _collect_nics(self, system: dict) -> list[dict]:
@@ -596,38 +600,146 @@ class RedfishDriver(BMCDriver):
             self._log("could not enumerate ethernet interfaces", level="warning")
         return nics
 
-    def _collect_drives(self, system: dict) -> list[dict]:
-        """Best-effort physical drive list.
-
-        The M4's RAID controller hides member disks behind virtual drives, so
-        this is inventory only. Anything that actually manipulates the array
-        happens in the ramdisk via StorCLI.
-        """
+    def _collect_storage(self, system: dict) -> tuple[list[dict], list[dict]]:
+        """Best-effort (physical drives, virtual drives) for the inventory."""
         drives: list[dict] = []
-        storage_path = (system.get("Storage") or {}).get("@odata.id")
-        if not storage_path:
-            return drives
+        volumes: list[dict] = []
         try:
-            for controller_ref in (self._get(storage_path).get("Members") or []):
-                controller = self._get(controller_ref["@odata.id"])
-                for drive_ref in (controller.get("Drives") or []):
-                    drive = self._get(drive_ref["@odata.id"])
-                    capacity = drive.get("CapacityBytes")
-                    drives.append(
-                        {
-                            "name": drive.get("Name") or drive.get("Id"),
-                            "serial": drive.get("SerialNumber"),
-                            "model": drive.get("Model"),
-                            "media": drive.get("MediaType"),
-                            "protocol": drive.get("Protocol"),
-                            "capacity_gb": round(capacity / 1_000_000_000) if capacity else None,
-                            "health": (drive.get("Status") or {}).get("Health"),
-                            "failure_predicted": drive.get("FailurePredicted"),
-                        }
-                    )
+            controllers = self.storage(system)
         except BMCError:
             self._log("could not enumerate storage", level="warning")
-        return drives
+            return drives, volumes
+        for controller in controllers:
+            for drive in controller["drives"]:
+                capacity = drive.get("capacity_bytes")
+                drives.append({
+                    "name": drive["name"],
+                    "serial": drive.get("serial"),
+                    "model": drive.get("model"),
+                    "media": drive.get("media"),
+                    "protocol": drive.get("protocol"),
+                    "capacity_gb": round(capacity / 1_000_000_000) if capacity else None,
+                    "health": drive.get("health"),
+                    "failure_predicted": drive.get("failure_predicted"),
+                    "state": drive.get("oem_state") or drive.get("state"),
+                    "controller": controller["name"],
+                })
+            for volume in controller["volumes"]:
+                capacity = volume.get("capacity_bytes")
+                volumes.append({
+                    "name": volume.get("name"),
+                    "raid_type": volume.get("raid_type"),
+                    "capacity_gb": round(capacity / 1_000_000_000) if capacity else None,
+                    "health": volume.get("health"),
+                    "controller": controller["name"],
+                })
+        return drives, volumes
+
+    # -- RAID ----------------------------------------------------------------
+
+    def storage(self, system: dict | None = None) -> list[dict]:
+        """Every storage controller with its physical and virtual drives.
+
+        Paths are kept on each entry so `create_volume` and `delete_volume`
+        can act on them without a second walk.
+        """
+        system = system or self._get(self.system_path)
+        storage_path = (system.get("Storage") or {}).get("@odata.id")
+        if not storage_path:
+            return []
+        controllers: list[dict] = []
+        for ref in self._get(storage_path).get("Members") or []:
+            controller = self._get(ref["@odata.id"])
+            sc = (controller.get("StorageControllers") or [{}])[0]
+            volumes_path = (controller.get("Volumes") or {}).get("@odata.id")
+            volumes: list[dict] = []
+            if volumes_path:
+                try:
+                    for vref in self._get(volumes_path).get("Members") or []:
+                        v = self._get(vref["@odata.id"])
+                        volumes.append({
+                            "path": v["@odata.id"],
+                            "id": v.get("Id"),
+                            "name": v.get("Name"),
+                            "raid_type": v.get("RAIDType") or v.get("VolumeType"),
+                            "capacity_bytes": v.get("CapacityBytes"),
+                            "health": (v.get("Status") or {}).get("Health"),
+                        })
+                except BMCError:
+                    self._log(f"could not list volumes on {controller.get('Id')}", level="warning")
+            drives: list[dict] = []
+            for dref in controller.get("Drives") or []:
+                d = self._get(dref["@odata.id"])
+                drives.append({
+                    "path": d["@odata.id"],
+                    "id": d.get("Id"),
+                    "name": d.get("Name") or d.get("Id"),
+                    "serial": d.get("SerialNumber"),
+                    "model": d.get("Model"),
+                    "media": d.get("MediaType"),
+                    "protocol": d.get("Protocol"),
+                    "capacity_bytes": d.get("CapacityBytes"),
+                    "health": (d.get("Status") or {}).get("Health"),
+                    "state": (d.get("Status") or {}).get("State"),
+                    "failure_predicted": d.get("FailurePredicted"),
+                    "oem_state": ((d.get("Oem") or {}).get("Cisco") or {}).get("DriveState"),
+                })
+            controllers.append({
+                "path": controller["@odata.id"],
+                "id": controller.get("Id"),
+                "name": sc.get("Name") or controller.get("Name") or controller.get("Id"),
+                "model": sc.get("Model"),
+                "raid_types": sc.get("SupportedRAIDTypes") or [],
+                "volumes_path": volumes_path,
+                "drives": drives,
+                "volumes": volumes,
+            })
+        return controllers
+
+    def delete_volume(self, path: str) -> None:
+        self._request("DELETE", path, expect=(200, 202, 204))
+        self._wait_for_task()
+
+    def create_volume(
+        self,
+        controller: dict,
+        *,
+        raid_type: str,
+        drive_paths: list[str],
+        name: str,
+        capacity_bytes: int | None = None,
+    ) -> None:
+        """POST a new virtual drive. The CIMC may answer 202 and finish it as a
+        task; this waits for that task before returning."""
+        volumes_path = controller.get("volumes_path") or f"{controller['path']}/Volumes"
+        body: dict[str, Any] = {
+            "Name": name,
+            "RAIDType": raid_type,
+            "Drives": [{"@odata.id": p} for p in drive_paths],
+        }
+        if capacity_bytes:
+            body["CapacityBytes"] = int(capacity_bytes)
+        self._request("POST", volumes_path, json_body=body, expect=(200, 201, 202, 204))
+        self._wait_for_task()
+
+    def _wait_for_task(self, timeout: int = 300) -> None:
+        """After a 202, poll the task the Location header names until it ends."""
+        if self._last_status != 202:
+            return
+        location = self._last_headers.get("Location") or self._last_headers.get("location")
+        if not location:
+            return
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            task = self._request("GET", urlparse(location).path or location, expect=(200, 202))
+            state = task.get("TaskState") or ""
+            if state in {"Completed"}:
+                return
+            if state in {"Exception", "Killed", "Cancelled"}:
+                reason = _redfish_message(task) or task.get("TaskStatus")
+                raise BMCError(f"BMC task ended in {state}: {reason}", response=_redact(task))
+            time.sleep(3)
+        raise BMCError(f"BMC task did not finish within {timeout}s")
 
     # -- health ------------------------------------------------------------
 

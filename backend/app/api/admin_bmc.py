@@ -30,6 +30,7 @@ from app.schemas import (
     IdentifyRequest,
     JobOut,
     PowerPolicyRequest,
+    RaidConfigureRequest,
     VmediaBootRequest,
 )
 from app.secrets import BMCCredential, SecretNotFoundError, get_secrets_backend
@@ -590,6 +591,30 @@ def boot_override(
         db, request, admin, server, JobType.BOOT_OVERRIDE,
         payload={"device": payload.device, "then": payload.then},
         audit_action="server.boot_override",
+    )
+
+
+@router.post("/servers/{server_id}/raid", response_model=JobOut,
+             status_code=status.HTTP_202_ACCEPTED)
+def configure_raid(
+    server_id: uuid.UUID,
+    payload: RaidConfigureRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    admin: Customer = Depends(current_admin),
+) -> Job:
+    """Build a virtual drive of the given level on the server's RAID
+    controller through its BMC, replacing whatever is there; level none
+    deletes every virtual drive. Destroys the data on those disks."""
+    if not payload.confirm_data_loss:
+        raise HTTPException(
+            status_code=400,
+            detail="set confirm_data_loss=true; rebuilding the array destroys everything on it",
+        )
+    server = _server(db, server_id)
+    return _queue(
+        db, request, admin, server, JobType.RAID_CONFIGURE,
+        payload={"level": payload.level.value}, audit_action="server.raid_configure",
     )
 
 

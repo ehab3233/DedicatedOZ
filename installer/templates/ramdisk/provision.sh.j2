@@ -358,12 +358,16 @@ do_wipe() {
 
 do_install() {
     report "preparing storage" 25 "clearing existing configuration"
+{% if raid.configured_by_bmc %}
+    log "array built through the BMC before this boot: {{ raid.configured_by_bmc }}"
+{% else %}
     if controller_present; then
         destroy_existing_arrays
         build_array "$RAID_LEVEL"
     else
-        log "no RAID controller found; installing to bare disks"
+        log "no RAID controller tool in this ramdisk; installing to the disks as they are"
     fi
+{% endif %}
 
     report "clearing old filesystems" 35 ""
     quick_wipe_signatures

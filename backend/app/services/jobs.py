@@ -41,6 +41,7 @@ EXCLUSIVE_JOB_TYPES = {
     JobType.BOOT_OVERRIDE,
     JobType.VMEDIA_BOOT,
     JobType.VMEDIA_EJECT,
+    JobType.RAID_CONFIGURE,
 }
 
 

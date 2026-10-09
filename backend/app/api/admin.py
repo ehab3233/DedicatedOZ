@@ -860,6 +860,7 @@ def _admin_server(db: Session, server: Server) -> AdminServerOut:
     )
     spec = server.hardware_spec or {}
     out.drives = spec.get("drives", [])
+    out.volumes = spec.get("volumes", [])
     out.nics = spec.get("nics", [])
     detail = server.health_detail or {}
     out.health = ServerHealthOut(

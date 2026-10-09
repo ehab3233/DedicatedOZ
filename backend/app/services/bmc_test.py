@@ -232,8 +232,9 @@ def _verdict(
         )
     if facts["encryption_key_custom"]:
         return "The CIMC has a custom IPMI encryption key, which the platform does not send.", (
-            "Set it back to all zeros in the CIMC web UI: Admin > Communication Services > "
-            "IPMI over LAN > Encryption Key."
+            "Run Prepare BMC: it sets the key back to all zeros (the CIMC's IPMI service "
+            "restarts, so the panel loses the server for a few seconds). Or do it in the "
+            "CIMC web UI: Admin > Communication Services > IPMI over LAN > Encryption Key."
         )
     if https_ok:
         return (
