@@ -276,6 +276,13 @@ class CimcXmlApi:
     def delete_virtual_drive(self, dn: str) -> dict[str, str]:
         return self.configure(dn, "storageVirtualDrive", adminAction="delete-virtual-drive")
 
+    def clear_foreign_config(self, controller_dn: str) -> dict[str, str]:
+        """Drop array metadata left on disks by a previous controller or array;
+        until it is cleared the disks cannot join a new array."""
+        return self.configure(
+            controller_dn, "storageController", adminAction="clear-foreign-config"
+        )
+
     def make_unconfigured_good(self, dn: str) -> dict[str, str]:
         return self.configure(dn, "storageLocalDisk", adminAction="make-unconfigured-good")
 

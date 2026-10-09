@@ -320,7 +320,22 @@ class TestRaidOverXmlApiFlow:
         ))
         responses.add(responses.POST, NUOVA,  # no virtual drives yet
                       body='<configResolveClass response="yes"><outConfigs/></configResolveClass>')
+        # First listing: what the C220 M4 in the field reported, verbatim.
         responses.add(responses.POST, NUOVA, body=(
+            '<configResolveClass response="yes"><outConfigs>'
+            f'<storageLocalDisk dn="{ctrl}/pd-1" id="1" pdStatus="Foreign Configuration" '
+            'pdState="unconfigured good" health="Moderate Fault" coercedSize="952720 MB" '
+            'mediaType="HDD" driveState="unconfigured good"/>'
+            f'<storageLocalDisk dn="{ctrl}/pd-2" id="2" pdStatus="Foreign Configuration" '
+            'pdState="unconfigured good" health="Moderate Fault" coercedSize="952720 MB" '
+            'mediaType="HDD" driveState="unconfigured good"/>'
+            '</outConfigs></configResolveClass>'
+        ))
+        responses.add(responses.POST, NUOVA, body=(  # clear-foreign-config
+            f'<configConfMo response="yes"><outConfig><storageController dn="{ctrl}" '
+            'adminAction="no-op"/></outConfig></configConfMo>'
+        ))
+        responses.add(responses.POST, NUOVA, body=(  # listed again, now usable
             '<configResolveClass response="yes"><outConfigs>'
             f'<storageLocalDisk dn="{ctrl}/pd-1" id="1" pdStatus="JBOD" health="Good" '
             'coercedSize="952720 MB" mediaType="HDD"/>'
@@ -355,6 +370,8 @@ class TestRaidOverXmlApiFlow:
             )
         assert summary["via"] == "cimc-xml" and summary["drives"] == ["disk 1", "disk 2"]
         bodies = [c.request.body.decode() for c in responses.calls]
+        assert any(f'<storageController dn="{ctrl}" adminAction="clear-foreign-config"' in b
+                   for b in bodies)
         assert any(f'<storageLocalDisk dn="{ctrl}/pd-1" adminAction="make-unconfigured-good"'
                    in b for b in bodies)
         creator = next(b for b in bodies if "VirtualDriveCreator" in b)

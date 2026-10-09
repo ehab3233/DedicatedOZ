@@ -289,13 +289,25 @@ def _configure_xml(api: CimcXmlApi, level: RaidLevel, log: LogSink) -> dict:
         log(f"deleting virtual drive {vd.get('name')}")
         api.delete_virtual_drive(vd["dn"])
 
-    raw_disks = api.local_disks(dn)
-    if not raw_disks:
-        # The disks' DNs do not hang off the controller's the way imcsdk's
-        # do on every build; take every physical disk the CIMC lists.
-        raw_disks = api.resolve_class("storageLocalDisk")
-        log(f"no disks under {dn}; {len(raw_disks)} physical disk object(s) in all",
-            level="warning")
+    def list_disks() -> list[dict[str, str]]:
+        found = api.local_disks(dn)
+        if not found:
+            # The disks' DNs do not hang off the controller's the way imcsdk's
+            # do on every build; take every physical disk the CIMC lists.
+            found = api.resolve_class("storageLocalDisk")
+            log(f"no disks under {dn}; {len(found)} physical disk object(s) in all",
+                level="warning")
+        return found
+
+    raw_disks = list_disks()
+    # Disks that still carry another array's metadata (a C220 M4 whose old
+    # array was never deleted shows pdStatus="Foreign Configuration" and
+    # health "Moderate Fault") cannot join a new one until the controller
+    # clears it.
+    if any("foreign" in (d.get("pdStatus") or "").lower() for d in raw_disks):
+        log("disks carry a foreign configuration; clearing it on the controller")
+        api.clear_foreign_config(dn)
+        raw_disks = list_disks()
     disks = []
     for d in raw_disks:
         state = (d.get("pdStatus") or d.get("pdState") or d.get("state")
