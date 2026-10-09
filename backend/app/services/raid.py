@@ -83,8 +83,8 @@ def describe_drive(d: dict) -> str:
 def unusable_reason(d: dict) -> str | None:
     if d.get("failure_predicted"):
         return "failure predicted"
-    if str(d.get("health") or "").lower() == "critical":
-        return "health critical"
+    if str(d.get("health") or "").lower() in ("critical", "severe fault"):
+        return f"health {d.get('health')}"
     for key in ("state", "oem_state"):
         value = str(d.get(key) or "").replace(" ", "").lower()
         if value in _UNUSABLE_STATES or value.replace(" ", "") in _UNUSABLE_STATES:
@@ -289,18 +289,34 @@ def _configure_xml(api: CimcXmlApi, level: RaidLevel, log: LogSink) -> dict:
         log(f"deleting virtual drive {vd.get('name')}")
         api.delete_virtual_drive(vd["dn"])
 
+    raw_disks = api.local_disks(dn)
+    if not raw_disks:
+        # The disks' DNs do not hang off the controller's the way imcsdk's
+        # do on every build; take every physical disk the CIMC lists.
+        raw_disks = api.resolve_class("storageLocalDisk")
+        log(f"no disks under {dn}; {len(raw_disks)} physical disk object(s) in all",
+            level="warning")
     disks = []
-    for d in api.local_disks(dn):
+    for d in raw_disks:
+        state = (d.get("pdStatus") or d.get("pdState") or d.get("state")
+                 or d.get("operability") or "")
         size = _parse_size(d.get("coercedSize") or d.get("size") or "")
-        disks.append({
-            "id": int(d.get("id") or 0), "dn": d["dn"], "name": f"disk {d.get('id')}",
-            "media": d.get("mediaType"), "capacity_bytes": size,
-            "state": d.get("pdStatus"), "health": d.get("health") or None,
-        })
-    free = [d for d in disks if d["state"] in ("Unconfigured Good", "JBOD")]
-    members = choose_drives(level, free)
+        disk = {
+            "id": int(re.sub(r"\D", "", d.get("id") or "") or 0), "dn": d.get("dn", ""),
+            "name": f"disk {d.get('id')}", "media": d.get("mediaType"),
+            "capacity_bytes": size or None, "state": state or None,
+            "health": d.get("health") or None,
+        }
+        disks.append(disk)
+        # What this firmware actually calls things, for the next person.
+        shown = {k: v for k, v in d.items()
+                 if k in ("id", "pdStatus", "pdState", "health", "coercedSize", "size",
+                          "mediaType", "driveFirmware", "predictiveFailureCount",
+                          "linkSpeed", "driveState", "operability", "dn")}
+        log(f"{describe_drive(disk)}; attributes: {shown}")
+    members = choose_drives(level, disks)
     for d in members:
-        if d["state"] == "JBOD":
+        if "jbod" in str(d["state"]).lower():
             log(f"{d['name']}: JBOD -> unconfigured good")
             api.make_unconfigured_good(d["dn"])
 

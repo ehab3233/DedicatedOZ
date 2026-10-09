@@ -306,6 +306,64 @@ class TestRaidOverXmlApi:
         )
 
 
+class TestRaidOverXmlApiFlow:
+    @responses.activate
+    def test_xml_path_builds_the_array_from_the_disks_the_cimc_lists(self):
+        from app.services import raid
+
+        ctrl = "sys/rack-unit-1/board/storage-SAS-SLOT-HBA"
+        _login_ok(responses)
+        responses.add(responses.POST, NUOVA, body=(
+            '<configResolveClass response="yes"><outConfigs>'
+            f'<storageController dn="{ctrl}" id="SLOT-HBA" type="SAS" '
+            'model="Cisco 12G SAS Modular Raid Controller"/></outConfigs></configResolveClass>'
+        ))
+        responses.add(responses.POST, NUOVA,  # no virtual drives yet
+                      body='<configResolveClass response="yes"><outConfigs/></configResolveClass>')
+        responses.add(responses.POST, NUOVA, body=(
+            '<configResolveClass response="yes"><outConfigs>'
+            f'<storageLocalDisk dn="{ctrl}/pd-1" id="1" pdStatus="JBOD" health="Good" '
+            'coercedSize="952720 MB" mediaType="HDD"/>'
+            f'<storageLocalDisk dn="{ctrl}/pd-2" id="2" pdStatus="Unconfigured Good" '
+            'health="Good" coercedSize="952720 MB" mediaType="HDD"/>'
+            '</outConfigs></configResolveClass>'
+        ))
+        responses.add(responses.POST, NUOVA, body=(  # make-unconfigured-good on pd-1
+            f'<configConfMo response="yes"><outConfig><storageLocalDisk dn="{ctrl}/pd-1" '
+            'pdStatus="Unconfigured Good"/></outConfig></configConfMo>'
+        ))
+        responses.add(responses.POST, NUOVA, body=(  # the creator
+            '<configConfMo response="yes"><outConfig>'
+            '<storageVirtualDriveCreatorUsingUnusedPhysicalDrive adminState="triggered"/>'
+            '</outConfig></configConfMo>'
+        ))
+        responses.add(responses.POST, NUOVA, body=(  # virtual drives afterwards
+            '<configResolveClass response="yes"><outConfigs>'
+            f'<storageVirtualDrive dn="{ctrl}/vd-0" id="0" name="doz" raidLevel="RAID 1"/>'
+            '</outConfigs></configResolveClass>'
+        ))
+        responses.add(responses.POST, NUOVA, body=(  # set-boot-drive
+            f'<configConfMo response="yes"><outConfig><storageVirtualDrive dn="{ctrl}/vd-0" '
+            'bootDrive="true"/></outConfig></configConfMo>'
+        ))
+        _logout_ok(responses)
+        logged: list[str] = []
+        with CimcXmlApi(HOST, CRED) as api:
+            summary = raid._configure_xml(
+                api, raid.RaidLevel.RAID1,
+                lambda m, level="info", request=None, response=None: logged.append(m),
+            )
+        assert summary["via"] == "cimc-xml" and summary["drives"] == ["disk 1", "disk 2"]
+        bodies = [c.request.body.decode() for c in responses.calls]
+        assert any(f'<storageLocalDisk dn="{ctrl}/pd-1" adminAction="make-unconfigured-good"'
+                   in b for b in bodies)
+        creator = next(b for b in bodies if "VirtualDriveCreator" in b)
+        assert 'raidLevel="1" driveGroup="[1,2]"' in creator
+        assert 'size="' in creator and ' MB"' in creator
+        assert any(f'dn="{ctrl}/vd-0" adminAction="set-boot-drive"' in b for b in bodies)
+        assert any("attributes: {" in m and "pdStatus" in m for m in logged)
+
+
 class TestRaidPlanning:
     def _drive(self, name, cap, media="HDD", **extra):
         return {"name": name, "path": f"/d/{name}", "capacity_bytes": cap, "media": media,
