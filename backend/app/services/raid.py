@@ -337,12 +337,24 @@ def _configure_xml(api: CimcXmlApi, level: RaidLevel, log: LogSink) -> dict:
         raise BMCError("the CIMC did not report the drives' sizes, which the XML API needs")
     ids = [d["id"] for d in members]
     groups = [ids[i:i + 2] for i in range(0, len(ids), 2)] if level is RaidLevel.RAID10 else [ids]
-    size_mb = int(capacity * 0.98) // 1_048_576
+    # coercedSize is what the controller will actually use, so the whole of
+    # it can be asked for (a CIMC-built RAID 1 over 952720 MB disks is
+    # exactly 952720 MB). A firmware that still objects gets 98%.
+    size_mb = capacity // 1_048_576
     log(f"building {describe(level, members, capacity)}")
-    api.create_virtual_drive(
-        dn, name=VOLUME_NAME, raid_level=XML_LEVEL[level], drive_groups=groups,
-        size=f"{size_mb} MB",
-    )
+    try:
+        api.create_virtual_drive(
+            dn, name=VOLUME_NAME, raid_level=XML_LEVEL[level], drive_groups=groups,
+            size=f"{size_mb} MB",
+        )
+    except BMCError as exc:
+        if "size" not in str(exc).lower():
+            raise
+        log(f"the CIMC rejected {size_mb} MB ({exc}); retrying at 98%", level="warning")
+        api.create_virtual_drive(
+            dn, name=VOLUME_NAME, raid_level=XML_LEVEL[level], drive_groups=groups,
+            size=f"{int(size_mb * 0.98)} MB",
+        )
     built = next((v for v in api.virtual_drives(dn) if v.get("name") == VOLUME_NAME), None)
     if built is None:
         raise BMCError("the CIMC accepted the request but lists no virtual drive afterwards")

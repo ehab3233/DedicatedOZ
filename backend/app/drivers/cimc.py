@@ -274,7 +274,10 @@ class CimcXmlApi:
                 if v.get("dn", "").startswith(controller_dn + "/")]
 
     def delete_virtual_drive(self, dn: str) -> dict[str, str]:
-        return self.configure(dn, "storageVirtualDrive", adminAction="delete-virtual-drive")
+        # No adminAction deletes a virtual drive (the CIMC lists the valid
+        # ones: initialise, set-boot-drive, hide...); as in Cisco's own SDK,
+        # the object is removed by marking it deleted.
+        return self.configure(dn, "storageVirtualDrive", status="deleted")
 
     def clear_foreign_config(self, controller_dn: str) -> dict[str, str]:
         """Drop array metadata left on disks by a previous controller or array;

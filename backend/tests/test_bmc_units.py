@@ -318,8 +318,16 @@ class TestRaidOverXmlApiFlow:
             f'<storageController dn="{ctrl}" id="SLOT-HBA" type="SAS" '
             'model="Cisco 12G SAS Modular Raid Controller"/></outConfigs></configResolveClass>'
         ))
-        responses.add(responses.POST, NUOVA,  # no virtual drives yet
-                      body='<configResolveClass response="yes"><outConfigs/></configResolveClass>')
+        responses.add(responses.POST, NUOVA, body=(  # the array someone built by hand
+            '<configResolveClass response="yes"><outConfigs>'
+            f'<storageVirtualDrive dn="{ctrl}/vd-0" id="0" name="RAID1_12" raidLevel="RAID 1" '
+            'size="952720 MB" vdStatus="Optimal" bootDrive="false"/>'
+            '</outConfigs></configResolveClass>'
+        ))
+        responses.add(responses.POST, NUOVA, body=(  # its deletion
+            f'<configConfMo response="yes"><outConfig><storageVirtualDrive dn="{ctrl}/vd-0" '
+            'status="deleted"/></outConfig></configConfMo>'
+        ))
         # First listing: what the C220 M4 in the field reported, verbatim.
         responses.add(responses.POST, NUOVA, body=(
             '<configResolveClass response="yes"><outConfigs>'
@@ -374,9 +382,11 @@ class TestRaidOverXmlApiFlow:
                    for b in bodies)
         assert any(f'<storageLocalDisk dn="{ctrl}/pd-1" adminAction="make-unconfigured-good"'
                    in b for b in bodies)
+        assert any(f'<storageVirtualDrive dn="{ctrl}/vd-0" status="deleted" />' in b
+                   for b in bodies)
         creator = next(b for b in bodies if "VirtualDriveCreator" in b)
         assert 'raidLevel="1" driveGroup="[1,2]"' in creator
-        assert 'size="' in creator and ' MB"' in creator
+        assert 'size="952720 MB"' in creator  # the disks' coerced size, in full
         assert any(f'dn="{ctrl}/vd-0" adminAction="set-boot-drive"' in b for b in bodies)
         assert any("attributes: {" in m and "pdStatus" in m for m in logged)
 
