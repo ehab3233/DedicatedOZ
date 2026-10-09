@@ -101,7 +101,7 @@ function NetbootCard() {
   const report = useAsync(() => api.netboot())
   const now = useNow()
   const r = report.data
-  const anyMissing = r ? !r.ramdisk.ready || r.templates.some((t) => !t.ready) : false
+  const anyMissing = r ? !r.ramdisk.ready || !r.loaders.ready || r.templates.some((t) => !t.ready) : false
   return (
     <Card
       title="Netboot images"
@@ -121,6 +121,18 @@ function NetbootCard() {
               <thead><tr><th>Boots</th><th>Files on the management server</th><th>Status</th></tr></thead>
               <tbody>
                 <tr>
+                  <td>
+                    <strong>iPXE loaders</strong>
+                    <div className="cell-sub">
+                      {r.loaders.embedded_url
+                        ? (r.loaders.embedded_url === r.loaders.expected_url ? `Chain to ${r.loaders.embedded_url}` : `Chain to ${r.loaders.embedded_url}, not ${r.loaders.expected_url}: rebuild with doz.sh ipxe`)
+                        : r.loaders.present ? 'Stock iPXE: loops on most DHCP servers; build with doz.sh ipxe' : 'Served over TFTP when PXE is on'}
+                    </div>
+                  </td>
+                  <td><FileList files={r.loaders.files} now={now} /></td>
+                  <td><Ready ok={r.loaders.ready} /></td>
+                </tr>
+                <tr>
                   <td><strong>Installer ramdisk</strong><div className="cell-sub">First on every rail; built by doz.sh ramdisk</div></td>
                   <td><FileList files={r.ramdisk.files} now={now} /></td>
                   <td><Ready ok={r.ramdisk.ready} /></td>
@@ -139,7 +151,7 @@ function NetbootCard() {
             <div className="card-body">
               <Banner kind="warning">
                 <div>A reinstall refuses to start while a file it boots is missing. On the management server:</div>
-                <pre className="mono small" style={{ margin: '8px 0 0', whiteSpace: 'pre-wrap' }}>{'sudo -u doz /opt/doz/deploy/fetch-os-images.sh   # kernels, initrds, the Ubuntu ISO\nsudo /opt/doz/doz.sh ramdisk                     # the installer ramdisk'}</pre>
+                <pre className="mono small" style={{ margin: '8px 0 0', whiteSpace: 'pre-wrap' }}>{'sudo -u doz /opt/doz/deploy/fetch-os-images.sh   # kernels, initrds, the Ubuntu ISO\nsudo /opt/doz/doz.sh ramdisk                     # the installer ramdisk and iPXE loaders'}</pre>
               </Banner>
             </div>
           )}

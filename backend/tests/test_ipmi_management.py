@@ -487,6 +487,32 @@ class TestNetbootAssets:
         (template,) = [t for t in report["templates"] if t["slug"] == "ubuntu-22.04"]
         assert template["ready"] is True
 
+    def test_loaders_are_ready_only_when_built_for_this_control_plane(
+        self, client, admin_headers, asset_dir, monkeypatch
+    ):
+        from app.config import settings
+
+        monkeypatch.setattr(settings, "control_plane_url", "http://10.0.0.5")
+        tftp = asset_dir.parent / "tftp"
+        tftp.mkdir(parents=True, exist_ok=True)
+
+        def loaders():
+            return client.get("/api/v1/admin/images/netboot", headers=admin_headers).json()[
+                "loaders"
+            ]
+
+        assert loaders()["present"] is False and loaders()["ready"] is False
+        (tftp / "undionly.kpxe").write_bytes(b"x" * 100)
+        stock = loaders()
+        assert stock["present"] is True and stock["embedded_url"] is None
+        assert stock["ready"] is False  # stock iPXE loops on most DHCP servers
+        (tftp / ".embedded-url").write_text("http://10.0.0.9\n")
+        assert loaders()["ready"] is False  # built for another address
+        (tftp / ".embedded-url").write_text("http://10.0.0.5\n")
+        built = loaders()
+        assert built["ready"] is True and built["embedded_url"] == "http://10.0.0.5"
+        assert built["files"][0]["size_bytes"] == 100
+
     def test_an_empty_file_counts_as_missing(self, asset_dir):
         from app.services import boot_assets
 

@@ -495,12 +495,21 @@ class NetbootRamdiskOut(BaseModel):
     ready: bool
 
 
+class NetbootLoadersOut(BaseModel):
+    files: list[NetbootFileOut]
+    present: bool
+    embedded_url: str | None
+    expected_url: str
+    ready: bool
+
+
 class NetbootReportOut(BaseModel):
     """What the PXE rails need on disk, and what is there."""
 
     asset_dir: str
     base_url: str
     ramdisk: NetbootRamdiskOut
+    loaders: NetbootLoadersOut
     templates: list[NetbootTemplateOut]
 
 

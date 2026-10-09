@@ -27,3 +27,4 @@ installer/assets/*
 *.swp
 .idea/
 .vscode/
+installer/tftp/

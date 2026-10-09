@@ -31,7 +31,9 @@
 #   ./doz.sh shell         python shell with the app importable
 #   ./doz.sh bench HOST    run the five hardware validation tests against a CIMC
 #   ./doz.sh assets        fetch OS installer images into installer/assets
-#   ./doz.sh ramdisk       build the installer ramdisk (installs docker and cpio if missing)
+#   ./doz.sh ramdisk       build the installer ramdisk, and on a PXE install the iPXE
+#                          loaders too (installs docker and cpio if missing)
+#   ./doz.sh ipxe          build only the iPXE loaders, chaining to DOZ_CONTROL_PLANE_URL
 
 set -euo pipefail
 
@@ -425,24 +427,47 @@ cmd_update() {
 }
 
 cmd_assets()  { exec "$ROOT/deploy/fetch-os-images.sh" "$@"; }
-cmd_ramdisk() {
-    # docker assembles the Alpine rootfs, cpio packs it. Installed here rather
-    # than refused: this is the one command a fresh management server runs
-    # before its first reinstall.
+# docker builds the ramdisk and iPXE, cpio packs the ramdisk. Installed here
+# rather than refused: these are the commands a fresh management server runs
+# before its first reinstall.
+need_build_tools() {
     local -a missing=()
     command -v docker >/dev/null 2>&1 || missing+=(docker.io)
     command -v cpio >/dev/null 2>&1 || missing+=(cpio)
     if [ "${#missing[@]}" -gt 0 ]; then
-        [ "$(id -u)" -eq 0 ] || die "the ramdisk build needs ${missing[*]}: sudo apt install -y ${missing[*]}"
+        [ "$(id -u)" -eq 0 ] || die "this build needs ${missing[*]}: sudo apt install -y ${missing[*]}"
         say "installing ${missing[*]}"
         apt-get install -y -qq "${missing[@]}" >/dev/null \
             || { apt-get update -qq; apt-get install -y -qq "${missing[@]}" >/dev/null; }
         command -v docker >/dev/null 2>&1 && systemctl enable --now docker >/dev/null 2>&1 || true
     fi
+}
+
+installed() { [ "$(id -u)" -eq 0 ] && id doz >/dev/null 2>&1 && [ -f /etc/doz/install.conf ]; }
+
+cmd_ramdisk() {
+    need_build_tools
     bash "$ROOT/installer/build-ramdisk.sh" --out "$ROOT/installer/assets/doz-installer" "$@"
     # On an installed system the asset tree belongs to the service user.
-    if [ "$(id -u)" -eq 0 ] && id doz >/dev/null 2>&1 && [ -f /etc/doz/install.conf ]; then
+    if installed; then
         chown -R doz:doz "$ROOT/installer/assets/doz-installer"
+        # PXE installs also need loaders that chain to this server.
+        if ! grep -qx 'PXE_MODE=none' /etc/doz/install.conf; then
+            cmd_ipxe
+        fi
+    fi
+}
+
+cmd_ipxe() {
+    need_build_tools
+    local url=""
+    [ -r /etc/doz/doz.env ] && url="$(sed -n 's/^DOZ_CONTROL_PLANE_URL=//p' /etc/doz/doz.env | tail -n1)"
+    url="${url:-${DOZ_CONTROL_PLANE_URL:-}}"
+    [ -n "$url" ] || die "DOZ_CONTROL_PLANE_URL is not set (it is in /etc/doz/doz.env on an install)"
+    bash "$ROOT/installer/build-ipxe.sh" --url "$url" --out "$ROOT/installer/tftp"
+    if installed; then
+        chown -R doz:doz "$ROOT/installer/tftp"
+        chmod -R a+rX "$ROOT/installer/tftp"
     fi
 }
 
@@ -474,6 +499,7 @@ case "$cmd" in
     bench)        cmd_bench "$@" ;;
     assets)       cmd_assets "$@" ;;
     ramdisk)      cmd_ramdisk "$@" ;;
+    ipxe)         cmd_ipxe ;;
     help|-h|--help)
         sed -n '2,35p' "$0" | sed 's/^# \{0,1\}//' ;;
     *)

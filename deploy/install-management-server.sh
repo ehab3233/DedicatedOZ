@@ -565,6 +565,23 @@ if [ "$PXE_MODE" != "none" ]; then
                 || { rm -f "$TFTP/$f.part"; note "could not fetch $f; place it in $TFTP by hand"; }
         fi
     done
+    # Loaders with the control plane URL built in: stock iPXE asks DHCP for a
+    # filename again and, on a DHCP server that cannot tell it from the PXE
+    # ROM (MikroTik, most routers), loops on undionly.kpxe. Built from
+    # source in docker, so only when docker is here; doz.sh ramdisk and
+    # doz.sh ipxe build them otherwise. Rebuilt when the address changes.
+    WANT_URL="http://${MGMT_IP}"
+    HAVE_URL="$(cat "$TFTP/.embedded-url" 2>/dev/null || true)"
+    if [ "$HAVE_URL" != "$WANT_URL" ]; then
+        if command -v docker >/dev/null 2>&1; then
+            note "building iPXE loaders that chain to $WANT_URL (a few minutes)"
+            bash "$INSTALL_DIR/installer/build-ipxe.sh" --url "$WANT_URL" --out "$TFTP" >/dev/null 2>&1 \
+                || note "iPXE build failed; run sudo $INSTALL_DIR/doz.sh ipxe to see why"
+        else
+            note "stock iPXE loaders in place; before the first reinstall run"
+            note "  sudo $INSTALL_DIR/doz.sh ramdisk   (builds the ramdisk and loaders that chain to $WANT_URL)"
+        fi
+    fi
     chown -R doz:doz "$TFTP"
     # dnsmasq drops to its own user and refuses to start ("TFTP directory
     # inaccessible") unless it can walk the whole path; a strict umask on
@@ -626,8 +643,8 @@ DNSMASQ
 
 # External DHCP: no DHCP here at all. The DHCP server on the servers' VLAN
 # hands out next-server=${MGMT_IP} with undionly.kpxe (BIOS) or ipxe.efi
-# (UEFI), and http://${MGMT_IP}/boot/ipxe to clients whose user class
-# (option 77) is "iPXE". This dnsmasq only serves TFTP.
+# (UEFI); the loaders served here chain to http://${MGMT_IP}/boot/ipxe on
+# their own. This dnsmasq only serves TFTP.
 DNSMASQ
     fi
     /usr/sbin/dnsmasq --test --conf-file=/etc/doz/dnsmasq.conf >/dev/null 2>&1 \
@@ -670,8 +687,13 @@ systemctl restart doz.service
 FAILED=""
 for p in $PARTS; do
     ok=0
-    for _ in $(seq 1 30); do
-        if systemctl is-active --quiet "$p"; then ok=1; break; fi
+    # A provisioning worker in the middle of a job gets up to TimeoutStopSec
+    # (60 s) to stop before it restarts, so allow for that; give up early
+    # only on a unit that has actually failed.
+    for _ in $(seq 1 90); do
+        state="$(systemctl is-active "$p" 2>/dev/null || true)"
+        [ "$state" = active ] && { ok=1; break; }
+        [ "$state" = failed ] && break
         sleep 1
     done
     if [ "$ok" -eq 1 ]; then note "$p: running"; else note "$p: NOT running"; FAILED="$FAILED $p"; fi
@@ -740,13 +762,10 @@ cat <<EXTERNAL
  for that subnet, set
    next-server (option 66) = ${MGMT_IP}
    filename    (option 67) = undionly.kpxe      (ipxe.efi for UEFI servers)
- and, for clients whose user class (option 77) is "iPXE",
-   filename    (option 67) = http://${MGMT_IP}/boot/ipxe
+ That is all: the loaders served here chain to http://${MGMT_IP}/boot/ipxe
+ themselves, whatever filename DHCP hands them afterwards.
  MikroTik RouterOS 7:
    /ip dhcp-server network set [find] next-server=${MGMT_IP} boot-file-name=undionly.kpxe
-   /ip dhcp-server option add name=doz-ipxe code=67 value="'http://${MGMT_IP}/boot/ipxe'"
-   /ip dhcp-server option sets add name=doz-ipxe options=doz-ipxe
-   /ip dhcp-server matcher add name=doz-ipxe server=<dhcp server name> code=77 value=iPXE matching-type=exact option-set=doz-ipxe
  The servers' VLAN must reach this VM on UDP 69 and TCP 80 and 8080.
 EXTERNAL
 fi

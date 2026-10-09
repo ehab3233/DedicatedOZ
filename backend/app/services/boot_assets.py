@@ -74,6 +74,48 @@ def template_files(template: OSTemplate) -> list[dict]:
     return files
 
 
+#: The iPXE loaders dnsmasq serves over TFTP.
+LOADER_FILES = (("undionly.kpxe", "BIOS"), ("ipxe.efi", "UEFI"))
+
+
+def tftp_dir() -> Path:
+    """Where the installer puts the TFTP root: next to the asset directory."""
+    return asset_dir().parent / "tftp"
+
+
+def loaders() -> dict:
+    """The iPXE loaders a PXE ROM fetches first, and what they chain to.
+
+    Stock loaders boot whatever filename DHCP gives them next, which loops
+    on most DHCP servers; ones built by build-ipxe.sh chain to the control
+    plane themselves, and record where in `.embedded-url`.
+    """
+    root = tftp_dir()
+    files = []
+    for name, role in LOADER_FILES:
+        entry = {"role": role, "path": f"tftp/{name}", "url": f"tftp://{name}",
+                 "present": False, "size_bytes": None, "modified_at": None}
+        try:
+            stat = (root / name).stat()
+            entry.update(present=stat.st_size > 0, size_bytes=stat.st_size,
+                         modified_at=datetime.fromtimestamp(stat.st_mtime, UTC))
+        except OSError:
+            pass
+        files.append(entry)
+    try:
+        embedded = (root / ".embedded-url").read_text().strip() or None
+    except OSError:
+        embedded = None
+    expected = settings.control_plane_url.rstrip("/")
+    return {
+        "files": files,
+        "present": any(f["present"] for f in files),
+        "embedded_url": embedded,
+        "expected_url": expected,
+        "ready": files[0]["present"] and embedded == expected,
+    }
+
+
 def ramdisk_files() -> list[dict]:
     return [
         file_status(rel, "kernel" if rel.endswith("vmlinuz") else "initrd")
@@ -112,5 +154,6 @@ def report(db: Session) -> dict:
         "asset_dir": str(asset_dir()),
         "base_url": settings.boot_asset_base_url.rstrip("/"),
         "ramdisk": {"files": ramdisk, "ready": ramdisk_ready},
+        "loaders": loaders(),
         "templates": templates,
     }

@@ -83,31 +83,37 @@ firewall, Windows DHCP): keep that DHCP server and tell it where to send PXE
 clients. Install with `DOZ_PXE=external` (or, on an existing install,
 `sudo /opt/doz-src/doz.sh install --external-dhcp`); the VM then serves TFTP
 and the boot scripts and does no DHCP of its own. On the DHCP server, for
-the servers' subnet, set:
+the servers' subnet, set two things:
 
 | Option | Value |
 |---|---|
 | next-server (66) | the VM's address |
 | filename (67) | `undionly.kpxe` (`ipxe.efi` for UEFI servers) |
-| filename (67), only for clients whose **user class (77) is `iPXE`** | `http://<VM>/boot/ipxe` |
 
-The second filename is what makes it work: the NIC's PXE ROM fetches iPXE
-over TFTP, iPXE asks DHCP again announcing itself as user class `iPXE`, and
-must then be handed the HTTP URL instead of itself. Without that rule it
-loops on the first filename. On a MikroTik (RouterOS 7):
+On a MikroTik (RouterOS 7):
 
 ```
 /ip dhcp-server network set [find] next-server=172.16.100.193 boot-file-name=undionly.kpxe
-/ip dhcp-server option add name=doz-ipxe code=67 value="'http://172.16.100.193/boot/ipxe'"
-/ip dhcp-server option sets add name=doz-ipxe options=doz-ipxe
-/ip dhcp-server matcher add name=doz-ipxe server=dhcp1 code=77 value=iPXE matching-type=exact option-set=doz-ipxe
 ```
 
-(`dhcp1` is the DHCP server's name in `/ip dhcp-server print`.) The servers'
-VLAN must reach the VM on UDP 69 and TCP 80 and 8080, and the VM must reach
-the CIMCs. `PXE-E53: No boot filename received` on the server's console
-means the first two options are missing; iPXE fetching `undionly.kpxe` a
-second time means the user-class rule is.
+That is enough because `sudo /opt/doz/doz.sh ramdisk` also builds the iPXE
+loaders the VM serves (`doz.sh ipxe` builds only those), with the VM's
+address compiled in. Stock iPXE, once loaded, asks DHCP again and boots
+whatever filename it gets, which on most DHCP servers is `undionly.kpxe`
+again, forever. A user-class rule is the usual workaround and does not work
+on a MikroTik: its `boot-file-name` fills the BOOTP file field, which iPXE
+reads before option 67. These loaders ignore the second filename and go
+straight to `http://<VM>/boot/ipxe`. The **Images** page shows whether the
+VM is serving them.
+
+The servers' VLAN must reach the VM on UDP 69 and TCP 80 and 8080, and the
+VM must reach the CIMCs. `PXE-E53: No boot filename received` on the
+server's console means the two options are missing; the console stuck at
+`TFTP...` means nothing on the VM answered (PXE is off, or UDP 69 is
+blocked); iPXE fetching `undionly.kpxe` over and over means the VM is still
+serving stock loaders, so run `sudo /opt/doz/doz.sh ipxe`. A NAT between
+the VLANs is fine: the boot rail does not pin clients to an address in this
+mode.
 
 The long form, from a checkout, is the same installer with flags:
 

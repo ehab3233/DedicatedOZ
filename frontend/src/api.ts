@@ -190,6 +190,7 @@ export interface NetbootReport {
   asset_dir: string
   base_url: string
   ramdisk: { files: NetbootFile[]; ready: boolean }
+  loaders: { files: NetbootFile[]; present: boolean; embedded_url: string | null; expected_url: string; ready: boolean }
   templates: NetbootTemplate[]
 }
 
