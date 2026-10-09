@@ -326,12 +326,29 @@ class TestRaidPlanning:
         assert raid.usable_capacity(raid.RaidLevel.RAID5, [1_000, 1_000, 900]) == 1_800
         assert raid.usable_capacity(raid.RaidLevel.RAID10, [10, 10, 10, 10]) == 20
 
-    def test_too_few_drives_is_a_clear_error(self):
+    def test_too_few_drives_is_a_clear_error_that_lists_every_drive(self):
         from app.services import raid
 
-        with pytest.raises(raid.RaidError, match="raid5 needs 3 drives; 2 usable of 2"):
+        with pytest.raises(raid.RaidError, match="raid5 needs 3 drives; 2 usable of 2") as err:
             raid.choose_drives(raid.RaidLevel.RAID5,
                                [self._drive("a", 10), self._drive("b", 10)])
+        assert "a: 0 GB HDD, health OK, state Enabled" in str(err.value)
+
+    def test_unknown_size_or_state_does_not_disqualify_a_drive(self):
+        # The C220's Redfish reported two drives the first filter threw out
+        # without saying why. Only states that cannot join an array exclude.
+        from app.services import raid
+
+        drives = [
+            {"name": "PD-1", "path": "/d/1", "health": "OK", "state": "Enabled",
+             "oem_state": "JBOD"},
+            {"name": "PD-2", "path": "/d/2", "health": None, "state": None},
+            {"name": "PD-3", "path": "/d/3", "health": "OK", "oem_state": "Unconfigured Bad"},
+        ]
+        chosen = raid.choose_drives(raid.RaidLevel.RAID1, drives)
+        assert [d["name"] for d in chosen] == ["PD-1", "PD-2"]
+        assert raid.usable_capacity(raid.RaidLevel.RAID1, [None, None]) is None
+        assert raid.unusable_reason(drives[2]) == "state Unconfigured Bad"
 
     def test_raid10_takes_an_even_number(self):
         from app.services import raid

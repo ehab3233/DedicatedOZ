@@ -44,16 +44,52 @@ class RaidError(RuntimeError):
     pass
 
 
-def usable_capacity(level: RaidLevel, sizes: list[int]) -> int:
-    """Bytes a virtual drive of `level` over drives of `sizes` can hold."""
-    n, smallest = len(sizes), min(sizes)
+def usable_capacity(level: RaidLevel, sizes: list[int | None]) -> int | None:
+    """Bytes a virtual drive of `level` over drives of `sizes` can hold, or
+    None when the BMC did not report every drive's size."""
+    if not sizes or any(not s for s in sizes):
+        return None
+    known = [int(s) for s in sizes if s]
+    n, smallest = len(known), min(known)
     return {
-        RaidLevel.RAID0: sum(sizes),
+        RaidLevel.RAID0: sum(known),
         RaidLevel.RAID1: smallest,
         RaidLevel.RAID5: (n - 1) * smallest,
         RaidLevel.RAID6: (n - 2) * smallest,
         RaidLevel.RAID10: (n // 2) * smallest,
     }[level]
+
+
+#: Drive states (Redfish Status.State and Cisco's DriveState) that cannot
+#: join an array. Anything else is tried: a BMC that reports something new
+#: is better answered by the controller than by a guess here.
+_UNUSABLE_STATES = {
+    "absent", "disabled", "unavailableoffline", "failed", "unconfiguredbad",
+    "unconfigured bad", "foreign", "foreignconfiguration", "predictivefailure",
+}
+
+
+def describe_drive(d: dict) -> str:
+    cap = d.get("capacity_bytes")
+    return (
+        f"{d.get('name') or d.get('id')}: "
+        f"{f'{int(cap) / 1_000_000_000:.0f} GB' if cap else 'size unknown'} "
+        f"{d.get('media') or ''}, health {d.get('health') or 'unknown'}, "
+        f"state {d.get('oem_state') or d.get('state') or 'unknown'}"
+        + (", failure predicted" if d.get("failure_predicted") else "")
+    )
+
+
+def unusable_reason(d: dict) -> str | None:
+    if d.get("failure_predicted"):
+        return "failure predicted"
+    if str(d.get("health") or "").lower() == "critical":
+        return "health critical"
+    for key in ("state", "oem_state"):
+        value = str(d.get(key) or "").replace(" ", "").lower()
+        if value in _UNUSABLE_STATES or value.replace(" ", "") in _UNUSABLE_STATES:
+            return f"state {d.get(key)}"
+    return None
 
 
 def choose_drives(level: RaidLevel, drives: list[dict]) -> list[dict]:
@@ -64,29 +100,32 @@ def choose_drives(level: RaidLevel, drives: list[dict]) -> list[dict]:
     """
     if level not in MIN_DRIVES:
         raise RaidError(f"{level.value} is not a RAID level that can be built")
-    eligible = [
-        d for d in drives
-        if d.get("health") in (None, "OK", "Good")
-        and not d.get("failure_predicted")
-        and d.get("state") in (None, "Enabled", "Unconfigured Good", "JBOD")
-        and d.get("capacity_bytes")
-    ]
-    eligible.sort(key=lambda d: (d.get("media") or "", -int(d["capacity_bytes"])))
+    eligible = [d for d in drives if unusable_reason(d) is None]
+    eligible.sort(key=lambda d: (d.get("media") or "", -int(d.get("capacity_bytes") or 0)))
     need = MIN_DRIVES[level]
     if len(eligible) < need:
+        detail = "; ".join(
+            f"{describe_drive(d)}" + (f" ({unusable_reason(d)})" if unusable_reason(d) else "")
+            for d in drives
+        )
         raise RaidError(
-            f"{level.value} needs {need} drives; {len(eligible)} usable of {len(drives)} found"
+            f"{level.value} needs {need} drives; {len(eligible)} usable of {len(drives)} "
+            f"found. Drives: {detail or 'none reported'}"
         )
     if level in (RaidLevel.RAID1, RaidLevel.RAID10):
         groups: dict[tuple, list[dict]] = {}
         for d in eligible:
-            groups.setdefault((d.get("media"), d["capacity_bytes"]), []).append(d)
+            groups.setdefault((d.get("media"), d.get("capacity_bytes")), []).append(d)
         best = max(groups.values(), key=len)
         if level is RaidLevel.RAID1:
             return best[:2] if len(best) >= 2 else eligible[:2]
         members = best if len(best) >= 4 else eligible
         return members[: len(members) - (len(members) % 2)]
     return eligible
+
+
+def _redfish_drive_is_jbod(d: dict) -> bool:
+    return "jbod" in str(d.get("oem_state") or d.get("state") or "").lower()
 
 
 def describe(level: RaidLevel, drives: list[dict], capacity_bytes: int | None) -> str:
@@ -104,8 +143,12 @@ def configure(server: Server, level: RaidLevel, *, log: LogSink = null_sink) -> 
         host=host, credential=credential, port=server.redfish_port,
         system_path=server.redfish_system_path, log=log,
     )
+
+    def xml_api() -> CimcXmlApi:
+        return CimcXmlApi(host, credential, port=server.redfish_port, log=log)
+
     try:
-        return _configure_redfish(redfish, level, log)
+        return _configure_redfish(redfish, level, log, xml_api=xml_api)
     except BMCError as exc:
         errors.append(f"Redfish: {exc}")
         log(f"Redfish could not build the array ({exc}); trying the CIMC XML API",
@@ -160,19 +203,42 @@ def _raid_controller(controllers: list[dict], *, name_of) -> dict:  # noqa: ANN0
     return capable[0]
 
 
-def _configure_redfish(redfish: RedfishDriver, level: RaidLevel, log: LogSink) -> dict:
+def _configure_redfish(
+    redfish: RedfishDriver, level: RaidLevel, log: LogSink, *, xml_api=None,  # noqa: ANN001
+) -> dict:
     controllers = redfish.storage()
-    controller = _raid_controller(
-        controllers, name_of=lambda c: " ".join(filter(None, [c.get("name"), c.get("model")]))
-    )
+    name_of = lambda c: " ".join(filter(None, [c.get("name"), c.get("model")]))  # noqa: E731
+    controller = _raid_controller(controllers, name_of=name_of)
     log(f"RAID controller: {controller['name']} ({len(controller['drives'])} drives, "
         f"{len(controller['volumes'])} virtual drives)")
-    for volume in controller["volumes"]:
-        log(f"deleting virtual drive {volume.get('name')}")
-        redfish.delete_volume(volume["path"])
+    for d in controller["drives"]:
+        log(describe_drive(d))
+    if controller["volumes"]:
+        for volume in controller["volumes"]:
+            log(f"deleting virtual drive {volume.get('name')}")
+            redfish.delete_volume(volume["path"])
+        # Member drives change state once their array is gone.
+        controller = next(
+            (c for c in redfish.storage() if c["path"] == controller["path"]), controller
+        )
 
     members = choose_drives(level, controller["drives"])
-    capacity = usable_capacity(level, [int(d["capacity_bytes"]) for d in members])
+    jbod = [d for d in members if _redfish_drive_is_jbod(d)]
+    if jbod:
+        # A JBOD disk cannot join an array. Redfish has no verb for the change
+        # on this firmware; the XML API does.
+        if xml_api is None:
+            raise BMCError("drives are in JBOD mode and no XML API is available to change that")
+        log(f"{len(jbod)} drive(s) in JBOD mode; making them unconfigured-good over the XML API")
+        with xml_api() as api:
+            for xml_controller in api.storage_controllers():
+                disks = {d.get("id"): d for d in api.local_disks(xml_controller["dn"])}
+                for d in jbod:
+                    disk_id = str(d.get("id") or "").replace("PD-", "")
+                    if disk_id in disks:
+                        api.make_unconfigured_good(disks[disk_id]["dn"])
+                        log(f"{d['name']}: JBOD -> unconfigured good")
+    capacity = usable_capacity(level, [d.get("capacity_bytes") for d in members])
     log(f"building {describe(level, members, capacity)}")
     try:
         redfish.create_volume(
@@ -184,6 +250,10 @@ def _configure_redfish(redfish: RedfishDriver, level: RaidLevel, log: LogSink) -
             raise
         # This firmware wants the size spelled out; leave headroom for the
         # controller's own coercion of drive sizes.
+        if capacity is None:
+            raise BMCError(
+                "the CIMC wants CapacityBytes but did not report the drives' sizes"
+            ) from exc
         log("the CIMC wants CapacityBytes; retrying with the computed size", level="warning")
         redfish.create_volume(
             controller, raid_type=REDFISH_TYPE[level], name=VOLUME_NAME,
@@ -235,6 +305,8 @@ def _configure_xml(api: CimcXmlApi, level: RaidLevel, log: LogSink) -> dict:
             api.make_unconfigured_good(d["dn"])
 
     capacity = usable_capacity(level, [d["capacity_bytes"] for d in members])
+    if capacity is None:
+        raise BMCError("the CIMC did not report the drives' sizes, which the XML API needs")
     ids = [d["id"] for d in members]
     groups = [ids[i:i + 2] for i in range(0, len(ids), 2)] if level is RaidLevel.RAID10 else [ids]
     size_mb = int(capacity * 0.98) // 1_048_576
