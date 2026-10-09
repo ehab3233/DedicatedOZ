@@ -231,10 +231,15 @@ else.
    unproven: `igb` for the LOM ports and `megaraid_sas` for the RAID card
    are the two drivers that matter.
 
-5. **Does `kexec` into the distribution installer work on this BIOS?** It
-   nearly always does. When it does not, the fallback is to skip kexec and
-   chainload the distro kernel directly from iPXE, with the ramdisk stage
-   done as a separate rescue-style job first.
+5. **The hand-off to the distribution installer is a second PXE boot, not
+   kexec.** On the C220 M4 the ramdisk ran to the kexec step and stopped:
+   Alpine's kernel ships with `kexec_load` disabled and no `kexec_file_load`,
+   so no image can be loaded (reproduced in QEMU). The ramdisk now prepares
+   the disks, calls the control plane's hand-off endpoint, which flags the
+   job and sets the BMC's one-time PXE boot again, and reboots; the next
+   boot script serves the distro kernel, initrd and answer file directly
+   from iPXE. One extra POST per install, and the same path for every
+   distribution.
 
 6. **Serial console and the rest of the CIMC setup.** Needs IPMI over LAN
    and SOL enabled on the CIMC, and BIOS console redirection on COM0 at

@@ -1,0 +1,31 @@
+#!ipxe
+# Second boot of a reinstall, rendered per MAC for job {{ job.id }}.
+#
+# The DedicatedOZ ramdisk has already wiped the disks and built the array,
+# and rebooted. This boots the distribution's own installer with its answer
+# file; it reports back when it has finished and reboots into the new OS.
+
+set doz-assets {{ boot_asset_base_url }}
+
+echo
+echo === DedicatedOZ: starting the {{ os.name }} {{ os.version }} installer ===
+echo Server : {{ server.serial }} ({{ server.model }})
+echo Job    : {{ job.id }}
+echo
+
+kernel {{ os.kernel_url }} \
+  initrd=initrd.img \
+  {{ os.installer_args }} \
+  {{ os.kernel_args }} \
+  console=tty0 console=ttyS0,115200n8 \
+  ip=dhcp || goto failed
+
+initrd {{ os.initrd_url }} || goto failed
+boot || goto failed
+
+:failed
+echo
+echo Failed to load the {{ os.name }} installer from {{ os.kernel_url }}.
+echo Check that it is on the management server (Images page, Netboot images).
+echo Dropping to a shell in 30 seconds so this stays visible on the console.
+sleep 30

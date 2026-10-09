@@ -438,7 +438,8 @@ What you should see, in order, over about fifteen to twenty minutes:
 | installer fetched boot script | job log, 20% | Never arrives → DHCP/TFTP/iPXE. `journalctl -u dnsmasq`, serial console |
 | installer booted | ramdisk callback, 25% | Ramdisk loaded but cannot reach `http://10.0.0.5` — is the data NIC on the same network as the VM? |
 | preparing storage / building array | 25–45% | StorCLI — bench test 5 |
-| running OS installer | 55% | kexec into Ubuntu. Serial console shows subiquity from here |
+| rebooting into the OS installer | 50% | The ramdisk has prepared the disks and reboots; the next PXE boot loads Ubuntu's own installer. If the box comes back into the ramdisk instead, the one-time PXE flag was not set (job log) |
+| the OS installer boots | serial and KVM | Ubuntu's installer runs with the answer file; its own messages show on the console from here |
 | Ubuntu 22.04 installed | callback | The installer's late-command reported back |
 | clearing boot override → install complete | 95–100% | Done. `ssh root@10.0.0.20` |
 

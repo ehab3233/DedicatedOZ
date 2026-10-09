@@ -32,9 +32,11 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.db import get_db
 from app.deps import client_ip
-from app.enums import ActorType, JobState
-from app.models import Job
+from app.drivers import BMCError, get_driver
+from app.enums import ActorType, JobState, JobType
+from app.models import Job, Server
 from app.schemas import InstallerComplete, InstallerProgress
+from app.secrets import SecretNotFoundError
 from app.security import hash_api_token, normalise_mac, verify_boot_signature
 from app.services import boot as boot_service
 from app.services import jobs as job_service
@@ -139,7 +141,10 @@ def ipxe_entry(
 
     _pin_client(db, job, request)
     script = boot_service.render_ipxe_script(db, server, job)
-    job_service.set_stage(db, job, "installer fetched boot script", progress=20)
+    if job.type == JobType.INSTALL.value and (job.result or {}).get("_handoff"):
+        job_service.set_stage(db, job, "loading the OS installer", progress=55)
+    else:
+        job_service.set_stage(db, job, "installer fetched boot script", progress=20)
     db.commit()
     return PlainTextResponse(script, media_type="text/plain")
 
@@ -263,6 +268,45 @@ def installer_progress(
     job_service.set_stage(db, job, payload.stage, progress=min(payload.progress, 94))
     if payload.message:
         job_service.log(db, job, payload.message, customer_visible=True)
+    db.commit()
+
+
+@router.post("/callback/{job_id}/handoff", status_code=status.HTTP_204_NO_CONTENT)
+def installer_handoff(
+    job: Job = Depends(authorised_job),
+    db: Session = Depends(get_db),
+) -> None:
+    """The ramdisk has prepared the disks and is about to reboot.
+
+    The next PXE boot must load the OS installer instead of the ramdisk, so
+    the job is flagged and the BMC's one-time PXE boot is set again (the
+    first one was used up by the boot that is ending). If the BMC cannot be
+    reached the job carries on: a wiped disk has nothing to boot, so the
+    persistent order Prepare BMC set (disk, then PXE) falls through to PXE.
+    """
+    if job.type != JobType.INSTALL.value:
+        raise HTTPException(status_code=409, detail="only an install hands off to an OS installer")
+    result = dict(job.result or {})
+    result["_handoff"] = True
+    job.result = result
+    db.add(job)
+    job_service.set_stage(db, job, "rebooting into the OS installer", progress=50)
+    db.commit()
+
+    server = db.get(Server, job.server_id) if job.server_id else None
+    if server is not None:
+        try:
+            sink = job_service.make_log_sink(db, job)
+            with get_driver(server, log=sink, interactive=True) as driver:
+                driver.set_boot_once("pxe")
+            job_service.log(db, job, "one-time PXE boot set for the OS installer")
+        except (BMCError, SecretNotFoundError, ValueError) as exc:
+            job_service.log(
+                db, job,
+                f"could not set the PXE boot flag ({exc}); relying on the boot order "
+                "falling through to PXE",
+                level="warning", customer_visible=True,
+            )
     db.commit()
 
 

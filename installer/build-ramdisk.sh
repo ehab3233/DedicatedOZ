@@ -54,7 +54,6 @@ echo "==> building rootfs from alpine:$ALPINE_VERSION"
 #   hdparm      -- ATA secure erase
 #   nvme-cli    -- nvme format
 #   sg3_utils   -- sg_format for SAS drives
-#   kexec-tools -- hand off to the distribution installer
 #   util-linux / e2fsprogs / parted -- wipefs, blockdev, partitioning
 #   pciutils    -- identifying the RAID controller when storcli misbehaves
 docker run --rm -v "$WORK:/out" \
@@ -73,7 +72,6 @@ docker run --rm -v "$WORK:/out" \
         curl ca-certificates \
         openssh openssh-server \
         hdparm nvme-cli sg3_utils \
-        kexec-tools \
         util-linux e2fsprogs parted \
         pciutils eudev \
         bash
@@ -104,7 +102,21 @@ mount -t sysfs none /sys
 mount -t devtmpfs none /dev 2>/dev/null || true
 mkdir -p /dev/pts && mount -t devpts none /dev/pts
 
-echo "[doz] installer ramdisk booting"
+# /dev/console is only the last console= device (the serial port, so the
+# SOL console sees everything). Whoever is watching the KVM should see the
+# same lines, so they go to the screen as well when that is a different
+# device. The provisioning script inherits DOZ_SCREEN for the same reason.
+DOZ_SCREEN=""
+if [ "$(awk '{print $NF}' /sys/class/tty/console/active 2>/dev/null)" != tty0 ] && [ -c /dev/tty0 ]; then
+    DOZ_SCREEN=/dev/tty0
+fi
+export DOZ_SCREEN
+say() {
+    echo "$*"
+    [ -n "$DOZ_SCREEN" ] && echo "$*" > "$DOZ_SCREEN" 2>/dev/null || true
+}
+
+say "[doz] installer ramdisk booting"
 
 /sbin/udevd --daemon 2>/dev/null || true
 # --action=add: udevadm's default is "change", and the rule that loads
@@ -138,8 +150,8 @@ done
 : "${DOZ_URL:=}" "${DOZ_MAC:=}" "${DOZ_SIG:=}"
 
 fail() {
-    echo "[doz] FATAL: $*"
-    echo "[doz] dropping to a shell. The serial console is attached."
+    say "[doz] FATAL: $*"
+    say "[doz] dropping to a shell. The serial console is attached."
     # PID 1 must never exit (the kernel panics), so a shell that is closed
     # is simply started again.
     while true; do /bin/sh </dev/console >/dev/console 2>&1; done
@@ -147,7 +159,7 @@ fail() {
 
 [ -n "$DOZ_URL" ] || fail "no doz_url on the kernel command line"
 
-echo "[doz] bringing up networking"
+say "[doz] bringing up networking"
 ip link set lo up
 # DHCP on the port that PXE booted (doz_mac) first. A C220 has two LOM
 # ports and often a VIC, and the first one the kernel lists is not
@@ -168,28 +180,28 @@ done
 for iface in $ifaces; do ip link set "$iface" up; done
 DOZ_IFACE=""
 for iface in $ifaces; do
-    echo "[doz] DHCP on $iface ($(cat "/sys/class/net/$iface/address"))"
+    say "[doz] DHCP on $iface ($(cat "/sys/class/net/$iface/address"))"
     # udhcpc backgrounds itself once it has a lease and keeps renewing it.
     if udhcpc -i "$iface" -t 6 -T 3 -n; then DOZ_IFACE=$iface; break; fi
 done
 [ -n "$DOZ_IFACE" ] || fail "DHCP failed on every interface:$ifaces"
 export DOZ_IFACE
 
-echo "[doz] fetching provisioning script for $DOZ_MAC"
+say "[doz] fetching provisioning script for $DOZ_MAC"
 i=1
 while [ "$i" -le 10 ]; do
     if curl -sf -m 30 -o /provision.sh \
         "$DOZ_URL/boot/provision/$DOZ_MAC?sig=$DOZ_SIG"; then
         break
     fi
-    echo "[doz] attempt $i failed, retrying"
+    say "[doz] attempt $i failed, retrying"
     sleep 5
     i=$((i + 1))
 done
 [ -s /provision.sh ] || fail "could not fetch the provisioning script from $DOZ_URL"
 
 chmod +x /provision.sh
-echo "[doz] handing off to the provisioning script (mode=${DOZ_MODE:-unknown})"
+say "[doz] handing off to the provisioning script (mode=${DOZ_MODE:-unknown})"
 /provision.sh
 
 # provision.sh is not supposed to return. If it does, something in the trap

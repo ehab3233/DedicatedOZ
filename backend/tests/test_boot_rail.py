@@ -276,6 +276,116 @@ class TestInstallerCallbacks:
         assert "_installer_status" not in body["result"]
 
 
+class TestHandoff:
+    """An install boots twice: the ramdisk, then the distribution's installer."""
+
+    @pytest.fixture
+    def bmc(self, monkeypatch):
+        from contextlib import contextmanager
+
+        from app.api import boot as boot_api
+
+        calls: list[str] = []
+
+        class Driver:
+            def set_boot_once(self, target):  # noqa: ANN001
+                calls.append(target)
+
+        @contextmanager
+        def fake_driver(server, log=None, interactive=False):  # noqa: ANN001
+            yield Driver()
+
+        monkeypatch.setattr(boot_api, "get_driver", fake_driver)
+        return calls
+
+    def test_provision_script_hands_off_by_rebooting(self, db, install_job):
+        server, job, _ = install_job
+        script = boot_service.render_provision_script(db, server, job)
+        assert f'JOB_ID="{job.id}"' in script
+        assert "/boot/callback/$JOB_ID/handoff" in script
+        assert "reboot -f" in script
+        assert "kexec -" not in script  # no kexec command: this kernel cannot
+
+    def test_handoff_flags_the_job_and_sets_pxe_for_the_next_boot(
+        self, client, db, install_job, bmc
+    ):
+        server, job, _ = install_job
+        token = job.payload["_callback_token"]
+        response = client.post(f"/boot/callback/{job.id}/handoff",
+                               headers={"Authorization": f"Bearer {token}"})
+        assert response.status_code == 204, response.text
+        db.refresh(job)
+        assert job.result["_handoff"] is True
+        assert job.stage == "rebooting into the OS installer" and job.progress == 50
+        assert bmc == ["pxe"]
+
+        # The next PXE boot gets the OS installer, not the ramdisk again.
+        script = client.get("/boot/ipxe", params={"mac": server.provisioning_mac}).text
+        assert "doz-installer" not in script
+        assert "kernel " in script and "/os/ubuntu-22.04/casper/vmlinuz" in script
+        assert "initrd " in script and "/os/ubuntu-22.04/casper/initrd" in script
+        sig = boot_signature(server.provisioning_mac)
+        assert "autoinstall ds=nocloud-net;s=http://" in script
+        assert f"/boot/nocloud/{server.provisioning_mac}/{sig}/" in script
+        assert "console=ttyS0,115200n8" in script
+        db.refresh(job)
+        assert job.stage == "loading the OS installer" and job.progress == 55
+
+    def test_handoff_without_a_reachable_bmc_still_hands_off(
+        self, client, db, install_job, monkeypatch
+    ):
+        from contextlib import contextmanager
+
+        from app.api import boot as boot_api
+        from app.drivers import BMCError
+
+        @contextmanager
+        def dead(server, log=None, interactive=False):  # noqa: ANN001
+            raise BMCError("IPMI session failed")
+            yield
+
+        monkeypatch.setattr(boot_api, "get_driver", dead)
+        server, job, _ = install_job
+        token = job.payload["_callback_token"]
+        response = client.post(f"/boot/callback/{job.id}/handoff",
+                               headers={"Authorization": f"Bearer {token}"})
+        assert response.status_code == 204
+        db.refresh(job)
+        assert job.result["_handoff"] is True
+        script = client.get("/boot/ipxe", params={"mac": server.provisioning_mac}).text
+        assert "/os/ubuntu-22.04/casper/vmlinuz" in script
+
+    def test_installer_args_per_method(self, make_template):
+        from app.enums import InstallMethod
+
+        mac, sig = "aa:bb:cc:00:00:01", "deadbeef"
+        ks = boot_service.installer_args(
+            make_template(install_method=InstallMethod.KICKSTART), mac=mac, signature=sig
+        )
+        assert ks.startswith("inst.ks=http://") and f"/boot/answer/{mac}?sig={sig} inst.text" in ks
+        ps = boot_service.installer_args(
+            make_template(install_method=InstallMethod.PRESEED), mac=mac, signature=sig
+        )
+        assert ps.startswith("auto=true priority=critical url=http://")
+        assert boot_service.installer_args(
+            make_template(install_method=InstallMethod.IMAGE), mac=mac, signature=sig
+        ) == ""
+
+    def test_only_installs_hand_off(self, client, db, make_customer, make_server,
+                                    make_subscription, make_ssh_key, bmc):
+        customer = make_customer()
+        server = make_server()
+        make_subscription(customer, server)
+        make_ssh_key(customer)
+        job = provisioning.create_rescue_job(db, server, ssh_key_ids=[], customer=customer)
+        db.commit()
+        token = job.payload["_callback_token"]
+        response = client.post(f"/boot/callback/{job.id}/handoff",
+                               headers={"Authorization": f"Bearer {token}"})
+        assert response.status_code == 409
+        assert bmc == []
+
+
 class TestWipeGating:
     def test_wipe_with_no_drives_erased_is_a_failure(self, db, make_server):
         """A wipe that erased nothing must not put a server back on sale."""

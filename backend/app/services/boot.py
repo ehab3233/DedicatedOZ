@@ -23,7 +23,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.enums import JobState, JobType
+from app.enums import InstallMethod, JobState, JobType
 from app.models import IPAssignment, Job, OSTemplate, Server, SSHKey, Subscription
 from app.security import boot_signature, hash_password
 
@@ -171,6 +171,9 @@ def install_context(db: Session, server: Server, job: Job) -> dict:
                 "initrd_url": _asset_url(template.initrd_path),
                 "iso_url": _asset_url(template.iso_path),
                 "kernel_args": _render_kernel_args(template.kernel_args),
+                "installer_args": installer_args(
+                    template, mac=mac, signature=boot_signature(mac) if mac else ""
+                ),
             }
             if template
             else None
@@ -190,6 +193,21 @@ def install_context(db: Session, server: Server, job: Job) -> dict:
         "boot_asset_base_url": settings.boot_asset_base_url.rstrip("/"),
         "boot_signature": boot_signature(mac) if mac else "",
     }
+
+
+def installer_args(template: OSTemplate, *, mac: str, signature: str) -> str:
+    """Kernel arguments that point a distribution's installer at its answer file."""
+    base = settings.control_plane_url.rstrip("/")
+    answer = f"{base}/boot/answer/{mac}?sig={signature}"
+    method = InstallMethod(template.install_method)
+    if method is InstallMethod.AUTOINSTALL:
+        # NoCloud wants a directory it can append user-data / meta-data to.
+        return f"autoinstall ds=nocloud-net;s={base}/boot/nocloud/{mac}/{signature}/"
+    if method is InstallMethod.KICKSTART:
+        return f"inst.ks={answer} inst.text"
+    if method is InstallMethod.PRESEED:
+        return f"auto=true priority=critical url={answer}"
+    return ""
 
 
 def _render_kernel_args(args: str | None) -> str:
@@ -222,6 +240,12 @@ def render_ipxe_script(db: Session, server: Server, job: Job) -> str:
         JobType.RESCUE.value: "ipxe/rescue.ipxe.j2",
         JobType.WIPE.value: "ipxe/wipe.ipxe.j2",
     }[job.type]
+    # An install boots twice: the ramdisk first (disks, RAID), then, once it
+    # has handed off and rebooted, the distribution's own installer.
+    if job.type == JobType.INSTALL.value and (job.result or {}).get("_handoff"):
+        if context["os"] is None:
+            raise ValueError("install job has no OS template to hand off to")
+        template_name = "ipxe/install-os.ipxe.j2"
     return render(template_name, context)
 
 

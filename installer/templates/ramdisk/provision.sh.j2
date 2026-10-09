@@ -5,7 +5,7 @@
 # Runs inside the installer ramdisk. Three modes share this script because
 # they share the first two thirds of their work:
 #
-#   install : wipe -> build RAID -> kexec into the distro installer
+#   install : wipe -> build RAID -> reboot into the distro installer
 #   rescue  : bring up SSH with the customer's keys, touch nothing
 #   wipe    : erase every drive and prove it, then report
 #
@@ -23,7 +23,10 @@ RAID_LEVEL="{{ raid.level }}"
 STORCLI="${STORCLI:-/opt/MegaRAID/storcli/storcli64}"
 
 log() {
-    echo "[doz] $*" | tee /dev/console
+    # The serial console (where /dev/console points when SOL is on) and,
+    # when the ramdisk's init found one, the screen behind the KVM too.
+    echo "[doz] $*" >/dev/console 2>/dev/null || echo "[doz] $*"
+    if [ -n "${DOZ_SCREEN:-}" ]; then echo "[doz] $*" >"$DOZ_SCREEN" 2>/dev/null || true; fi
 }
 
 # BusyBox sleep does not accept "infinity"; this is the portable spelling.
@@ -371,40 +374,32 @@ do_install() {
 
 install_os() {
 {% if os %}
-    ANSWER_URL="{{ control_plane_url }}/boot/answer/{{ server.mac }}?sig={{ boot_signature }}"
-
-    log "fetching installer kernel and initrd"
-    curl -sf -o /tmp/vmlinuz "{{ os.kernel_url }}"
-    curl -sf -o /tmp/initrd.img "{{ os.initrd_url }}"
-
-    # Hand off to the distribution's own installer. It is far better at
-    # bootloader placement and driver selection than anything we would write,
-    # and it is what the answer file formats expect.
-{% if os.install_method == 'autoinstall' %}
-    # NoCloud wants a directory it can append user-data / meta-data to.
-    SEED_URL="{{ control_plane_url }}/boot/nocloud/{{ server.mac }}/{{ boot_signature }}/"
-    KARGS="autoinstall ds=nocloud-net;s=$SEED_URL"
-{% elif os.install_method == 'kickstart' %}
-    KARGS="inst.ks=$ANSWER_URL inst.text"
-{% elif os.install_method == 'preseed' %}
-    KARGS="auto=true priority=critical url=$ANSWER_URL"
-{% else %}
-    KARGS=""
-{% endif %}
-
-    log "kexec into the {{ os.name }} installer"
-    report "running OS installer" 55 "the machine will not respond to SSH until this finishes"
-
-    kexec -l /tmp/vmlinuz \
-        --initrd=/tmp/initrd.img \
-        --command-line="$KARGS {{ os.kernel_args }} console=tty0 console=ttyS0,115200n8 ip=dhcp"
-
-    # From here the OS installer owns the machine and reports completion from
-    # its own post-install hook. This process is about to cease to exist, so
-    # the exit trap must not fire on the way out.
+    # Hand off to the distribution's own installer by rebooting: the control
+    # plane sets the BMC's one-time PXE flag again and serves the distro's
+    # kernel, initrd and answer file on the next boot. (kexec would skip the
+    # reboot, but this kernel has kexec_load disabled and no kexec_file_load,
+    # and a second PXE boot is the more predictable path on this BIOS anyway.)
+    log "storage ready; handing over to the {{ os.name }} installer"
+    i=1
+    while [ "$i" -le 5 ]; do
+        if curl -sf -m 30 -X POST -H "Authorization: Bearer $CALLBACK_TOKEN" \
+            "$CONTROL_PLANE/boot/callback/$JOB_ID/handoff" >/dev/null 2>&1; then
+            log "rebooting; the next PXE boot loads {{ os.name }} {{ os.version }}"
+            # This process is about to cease to exist, so the exit trap must
+            # not fire on the way out.
+            trap - EXIT
+            sync
+            reboot -f
+            sleep 60
+            exit 0
+        fi
+        log "hand-off callback attempt $i failed; retrying"
+        sleep $((i * 5))
+        i=$((i + 1))
+    done
+    complete false "could not reach the control plane to hand over to the OS installer" || true
     trap - EXIT
-    sync
-    kexec -e
+    hold
 {% else %}
     complete false "job has no OS template attached"
     trap - EXIT
