@@ -222,8 +222,14 @@ else.
    changes deprovisioning from minutes to hours per server.
 
 4. **Does the Alpine ramdisk see the NICs and the RAID controller?** `igb`
-   and `megaraid_sas` are in `linux-lts`, and udev coldplug should load them,
-   but "should" is the operative word until one boots.
+   and `megaraid_sas` are in `linux-lts`. The built image has been booted in
+   QEMU: udev coldplug loads the NIC driver (it did not before: `udevadm
+   trigger` defaults to a "change" event, and the driver rule only runs on
+   "add"), DHCP runs on the port whose MAC iPXE booted from even when an
+   unplugged port is listed first, and the provisioning script is fetched
+   and run with every disk tool present. On a real C220 M4 it is still
+   unproven: `igb` for the LOM ports and `megaraid_sas` for the RAID card
+   are the two drivers that matter.
 
 5. **Does `kexec` into the distribution installer work on this BIOS?** It
    nearly always does. When it does not, the fallback is to skip kexec and

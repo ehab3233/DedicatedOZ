@@ -17,6 +17,8 @@
 set -euo pipefail
 
 ALPINE_VERSION="${ALPINE_VERSION:-3.20}"
+# Any Alpine mirror; packages are signature-checked either way.
+ALPINE_MIRROR="${ALPINE_MIRROR:-https://dl-cdn.alpinelinux.org/alpine}"
 OUT_DIR="./assets/doz-installer"
 STORCLI_DEB="${STORCLI_DEB:-}"
 
@@ -42,10 +44,17 @@ echo "==> building rootfs from alpine:$ALPINE_VERSION"
 #   kexec-tools -- hand off to the distribution installer
 #   util-linux / e2fsprogs / parted -- wipefs, blockdev, partitioning
 #   pciutils    -- identifying the RAID controller when storcli misbehaves
-docker run --rm -v "$WORK:/out" "alpine:$ALPINE_VERSION" sh -euc '
+docker run --rm -v "$WORK:/out" \
+    -e ALPINE_VERSION="$ALPINE_VERSION" -e ALPINE_MIRROR="$ALPINE_MIRROR" \
+    "alpine:$ALPINE_VERSION" sh -euc '
+    # A fresh --root has no signing keys, so apk cannot verify the index,
+    # calls it UNTRUSTED and then reports every package as missing. Give the
+    # new root the keys and repositories the image itself trusts.
+    mkdir -p /out/etc/apk/keys
+    cp /etc/apk/keys/* /out/etc/apk/keys/
+    printf "%s\n" "$ALPINE_MIRROR/v$ALPINE_VERSION/main" \
+        "$ALPINE_MIRROR/v$ALPINE_VERSION/community" > /out/etc/apk/repositories
     apk add --no-cache --initdb --root /out \
-        --repository https://dl-cdn.alpinelinux.org/alpine/v'"$ALPINE_VERSION"'/main \
-        --repository https://dl-cdn.alpinelinux.org/alpine/v'"$ALPINE_VERSION"'/community \
         alpine-baselayout busybox openrc \
         linux-lts linux-firmware-none \
         curl ca-certificates \
@@ -55,6 +64,16 @@ docker run --rm -v "$WORK:/out" "alpine:$ALPINE_VERSION" sh -euc '
         util-linux e2fsprogs parted \
         pciutils eudev \
         bash
+
+    # Drivers an installer on a rack server never uses. Without them the
+    # initrd is a third the size: quicker to fetch over iPXE, less RAM.
+    kver=$(ls /out/lib/modules)
+    cd "/out/lib/modules/$kver/kernel"
+    rm -rf sound drivers/gpu drivers/media drivers/net/wireless drivers/bluetooth \
+        drivers/staging drivers/iio drivers/infiniband drivers/isdn drivers/video \
+        drivers/input/joystick drivers/input/tablet drivers/input/touchscreen \
+        net/wireless net/mac80211 net/bluetooth
+    chroot /out depmod -a "$kver"
 '
 
 echo "==> installing the init script"
@@ -75,8 +94,22 @@ mkdir -p /dev/pts && mount -t devpts none /dev/pts
 echo "[doz] installer ramdisk booting"
 
 /sbin/udevd --daemon 2>/dev/null || true
-/sbin/udevadm trigger 2>/dev/null || true
+# --action=add: udevadm's default is "change", and the rule that loads
+# drivers (80-drivers.rules) only runs on "add". Without it no NIC, RAID or
+# disk driver loads and there is nothing to install over or onto.
+/sbin/udevadm trigger --type=subsystems --action=add 2>/dev/null || true
+/sbin/udevadm trigger --type=devices --action=add 2>/dev/null || true
 /sbin/udevadm settle --timeout=30 2>/dev/null || true
+# Belt and braces: load a driver for every device the kernel can name, the
+# way Alpine's own initramfs does, in case udev missed any.
+find /sys/devices -name modalias -exec cat {} + 2>/dev/null | sort -u \
+    | xargs -r modprobe -abq 2>/dev/null || true
+/sbin/udevadm settle --timeout=30 2>/dev/null || true
+# NICs register a moment after their driver loads.
+n=0
+while [ "$n" -lt 10 ] && [ "$(ls /sys/class/net | grep -vc '^lo$')" -eq 0 ]; do
+    sleep 1; n=$((n + 1))
+done
 
 # Kernel parameters, set by the iPXE script.
 for param in $(cat /proc/cmdline); do
@@ -94,19 +127,40 @@ done
 fail() {
     echo "[doz] FATAL: $*"
     echo "[doz] dropping to a shell. The serial console is attached."
-    exec /bin/sh
+    # PID 1 must never exit (the kernel panics), so a shell that is closed
+    # is simply started again.
+    while true; do /bin/sh </dev/console >/dev/console 2>&1; done
 }
 
 [ -n "$DOZ_URL" ] || fail "no doz_url on the kernel command line"
 
 echo "[doz] bringing up networking"
 ip link set lo up
-for iface in $(ls /sys/class/net | grep -v '^lo$'); do
-    ip link set "$iface" up
+# DHCP on the port that PXE booted (doz_mac) first. A C220 has two LOM
+# ports and often a VIC, and the first one the kernel lists is not
+# necessarily the one with a cable. Then every other port, in case the MAC
+# was recorded wrong.
+want=$(echo "$DOZ_MAC" | tr 'A-F-' 'a-f:')
+ifaces=""
+for path in /sys/class/net/*; do
+    name=${path##*/}
+    [ "$name" = lo ] && continue
+    if [ -n "$want" ] && [ "$(cat "$path/address" 2>/dev/null)" = "$want" ]; then
+        ifaces="$name $ifaces"
+    else
+        ifaces="$ifaces $name"
+    fi
 done
-# The provisioning VLAN runs DHCP; that is how iPXE got here in the first place.
-udhcpc -i "$(ls /sys/class/net | grep -v '^lo$' | head -n1)" -t 10 -T 3 -n \
-    || fail "DHCP failed on the provisioning VLAN"
+[ -n "$ifaces" ] || fail "no network interfaces: the NIC driver did not load"
+for iface in $ifaces; do ip link set "$iface" up; done
+DOZ_IFACE=""
+for iface in $ifaces; do
+    echo "[doz] DHCP on $iface ($(cat "/sys/class/net/$iface/address"))"
+    # udhcpc backgrounds itself once it has a lease and keeps renewing it.
+    if udhcpc -i "$iface" -t 6 -T 3 -n; then DOZ_IFACE=$iface; break; fi
+done
+[ -n "$DOZ_IFACE" ] || fail "DHCP failed on every interface:$ifaces"
+export DOZ_IFACE
 
 echo "[doz] fetching provisioning script for $DOZ_MAC"
 i=1
@@ -143,13 +197,16 @@ else
     echo "    installs will land on bare disks."
 fi
 
-echo "==> packing initrd"
 mkdir -p "$OUT_DIR"
-( cd "$WORK" && find . -print0 | cpio --null -o --format=newc ) | gzip -9 > "$OUT_DIR/initrd.img"
-
 KERNEL="$(find "$WORK/boot" -name 'vmlinuz-*' | head -n1)"
 [ -n "$KERNEL" ] || { echo "no kernel found in the rootfs" >&2; exit 1; }
 cp "$KERNEL" "$OUT_DIR/vmlinuz"
+# iPXE fetches the kernel separately, and Alpine's own initramfs is never
+# used, so /boot stays out of the image.
+rm -rf "$WORK/boot"
+
+echo "==> packing initrd"
+( cd "$WORK" && find . -print0 | cpio --null -o --format=newc --quiet ) | gzip -9 > "$OUT_DIR/initrd.img"
 
 echo
 echo "==> done"

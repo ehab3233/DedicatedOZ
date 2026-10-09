@@ -21,8 +21,7 @@ kernel ${doz-assets}/doz-installer/vmlinuz \
   doz_sig={{ boot_signature }} \
   doz_job={{ job.id }} \
   doz_mode=wipe \
-  console=tty0 console=ttyS0,115200n8 \
-  ip=dhcp rd.neednet=1 || goto failed
+  console=tty0 console=ttyS0,115200n8 || goto failed
 
 initrd ${doz-assets}/doz-installer/initrd.img || goto failed
 boot || goto failed
