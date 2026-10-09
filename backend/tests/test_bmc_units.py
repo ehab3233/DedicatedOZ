@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import uuid
+
 import pytest
 import responses
 
@@ -394,6 +396,7 @@ class TestAdminBmcEndpoints:
                           headers=auth_header(admin)).json()
         assert body == {
             "protocol": "ipmi", "ipmi_port": 6230, "redfish_port": 443,
+            "ipmi_cipher_suite": "3", "cipher_source": "platform",
             "credential_ref": server.cimc_credential_ref, "credential_resolves": True,
             "username": "admin",
         }
@@ -443,6 +446,185 @@ class TestConsoleTickets:
         response = client.post(f"/api/v1/console/{server.id}/ticket",
                                headers=auth_header(customer))
         assert response.status_code == 409
+
+
+class TestConnectionTest:
+    def test_a_working_cipher_is_remembered_for_the_server(
+        self, client, db, make_customer, make_server, auth_header, monkeypatch
+    ):
+        from app.api import admin_bmc
+
+        admin = make_customer("admin@example.com", admin=True)
+        server = make_server()
+        report = {
+            "ok": True, "checks": [], "facts": {}, "configured_cipher": "3",
+            "working_cipher": "17", "verdict": "IPMI works with cipher suite 17", "hint": None,
+        }
+        monkeypatch.setattr(admin_bmc.bmc_test, "run", lambda server, credential: dict(report))
+
+        body = client.post(f"/api/v1/admin/servers/{server.id}/bmc/test",
+                           headers=auth_header(admin)).json()
+        assert body["cipher_saved"] is True and body["working_cipher"] == "17"
+        db.refresh(server)
+        assert server.ipmi_cipher_suite == "17"
+
+        settings = client.get(f"/api/v1/admin/servers/{server.id}/bmc",
+                              headers=auth_header(admin)).json()
+        assert settings["ipmi_cipher_suite"] == "17" and settings["cipher_source"] == "server"
+
+        # The configured suite working again is not a change.
+        report["working_cipher"] = "17"
+        report["configured_cipher"] = "17"
+        body = client.post(f"/api/v1/admin/servers/{server.id}/bmc/test",
+                           headers=auth_header(admin)).json()
+        assert body["cipher_saved"] is False
+
+    def test_the_probe_is_stored_as_auto_and_used_as_no_cipher_flag(self, make_server):
+        from app.drivers.factory import cipher_for, get_ipmi_driver
+
+        server = make_server(ipmi_cipher_suite="auto")
+        assert cipher_for(server) == ""
+        assert "-C" not in get_ipmi_driver(server).base_command()
+        server.ipmi_cipher_suite = "17"
+        cmd = get_ipmi_driver(server).base_command()
+        assert cmd[cmd.index("-C") + 1] == "17"
+
+    def test_bmc_reset_falls_back_to_redfish_when_ipmi_is_dead(
+        self, client, make_customer, make_server, auth_header, monkeypatch
+    ):
+        from app.drivers.ipmi import IpmiDriver
+        from app.drivers.redfish import RedfishDriver
+
+        admin = make_customer("admin@example.com", admin=True)
+        server = make_server()
+        calls: list[str] = []
+
+        def dead(self, kind="cold"):  # noqa: ANN001
+            raise BMCError("ipmitool mc reset cold: IPMI session failed")
+
+        monkeypatch.setattr(IpmiDriver, "bmc_reset", dead)
+        monkeypatch.setattr(RedfishDriver, "manager_reset",
+                            lambda self: calls.append("manager_reset") or "ForceRestart")
+        body = client.post(f"/api/v1/admin/servers/{server.id}/bmc/reset",
+                           headers=auth_header(admin)).json()
+        assert body["via"] == "redfish" and calls == ["manager_reset"]
+
+
+class TestLiveReadCache:
+    def test_a_failed_read_is_retried_once_then_held(self, monkeypatch):
+        from app.services import bmc_status
+
+        server_id = uuid.uuid4()
+        calls = {"n": 0}
+
+        def read():
+            calls["n"] += 1
+            raise BMCError("IPMI session failed")
+
+        for _ in range(3):
+            with pytest.raises(BMCError, match="session failed"):
+                bmc_status.cached("sensors", server_id, read)
+        assert calls["n"] == 2  # first poll: one retry after the quick failure; then held
+
+        # A forced refresh always asks the BMC again.
+        with pytest.raises(BMCError):
+            bmc_status.cached("sensors", server_id, read, fresh=True)
+        assert calls["n"] == 4
+
+        # Once the hold has passed, so does the next poll.
+        monkeypatch.setattr(bmc_status, "ERROR_HOLD_SECONDS", 0.0)
+        with pytest.raises(BMCError):
+            bmc_status.cached("sensors", server_id, read)
+        assert calls["n"] == 6
+        bmc_status.forget(server_id)
+
+    def test_a_missed_poll_shows_the_last_good_reading_as_stale(self, monkeypatch):
+        from app.config import settings
+        from app.services import bmc_status
+
+        server_id = uuid.uuid4()
+        answers = [{"sensors": [1, 2], "checked_at": "t0"}, BMCError("lost packet")]
+
+        def read():
+            answer = answers.pop(0)
+            if isinstance(answer, Exception):
+                raise answer
+            return answer
+
+        assert bmc_status.cached("sensors", server_id, read)["sensors"] == [1, 2]
+        monkeypatch.setattr(settings, "bmc_live_cache_seconds", 0)
+        answers.append(BMCError("lost packet again"))  # the retry
+        stale = bmc_status.cached("sensors", server_id, read)
+        assert stale["sensors"] == [1, 2] and stale["stale"] is True
+        assert "lost packet" in stale["error"]
+
+        # Past the stale window the error is what the caller gets.
+        monkeypatch.setattr(settings, "bmc_stale_after_seconds", 0)
+        monkeypatch.setattr(bmc_status, "ERROR_HOLD_SECONDS", 0.0)
+        answers.extend([BMCError("still lost"), BMCError("still lost")])
+        with pytest.raises(BMCError, match="still lost"):
+            bmc_status.cached("sensors", server_id, read)
+        bmc_status.forget(server_id)
+
+    def test_power_keeps_the_last_state_through_a_missed_poll(self, db, make_server, monkeypatch):
+        from contextlib import contextmanager
+
+        from app.config import settings
+        from app.services import bmc_status
+
+        server = make_server()
+        outcomes = ["on", BMCError("lost"), BMCError("lost")]
+
+        class Driver:
+            def power_status(self):
+                outcome = outcomes.pop(0)
+                if isinstance(outcome, Exception):
+                    raise outcome
+                return type("P", (), {"state": outcome})()
+
+        @contextmanager
+        def fake_driver(server, interactive=False):  # noqa: ANN001
+            yield Driver()
+
+        monkeypatch.setattr(bmc_status, "get_driver", fake_driver)
+        monkeypatch.setattr(bmc_status, "protocol_label", lambda d: "ipmi")
+        bmc_status.forget(server.id)
+
+        first = bmc_status.read_power(db, server)
+        assert first["state"] == "on" and first["stale"] is False
+
+        bmc_status._cache.pop(server.id, None)
+        second = bmc_status.read_power(db, server)
+        assert second["state"] == "on" and second["stale"] is True and "lost" in second["error"]
+
+        monkeypatch.setattr(settings, "bmc_stale_after_seconds", 0)
+        outcomes.extend([BMCError("lost"), BMCError("lost")])
+        bmc_status._cache.pop(server.id, None)
+        third = bmc_status.read_power(db, server)
+        assert third["state"] == "unknown" and third["stale"] is False
+        bmc_status.forget(server.id)
+
+    def test_health_sweep_keeps_the_last_verdict_through_missed_polls(
+        self, db, make_server, monkeypatch
+    ):
+        from contextlib import contextmanager
+
+        from app.workers import tasks
+
+        server = make_server(health_status="ok", health_detail={"psu": "ok"})
+
+        @contextmanager
+        def dead(server, log=None):  # noqa: ANN001
+            raise BMCError("no answer")
+            yield
+
+        monkeypatch.setattr(tasks, "get_driver", dead)
+        for expected_status, expected_missed in (("ok", 1), ("ok", 2), ("unknown", 3)):
+            result = tasks._poll_health(db, server)
+            assert result["status"] == expected_status
+            assert result["missed_polls"] == expected_missed
+            assert server.health_status == expected_status
+        assert "psu" not in server.health_detail
 
 
 class TestSchemaUpgrade:

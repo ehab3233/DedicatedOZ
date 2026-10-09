@@ -179,6 +179,10 @@ class ServerHealthOut(BaseModel):
     status: str | None
     checked_at: datetime | None
     subsystems: dict = Field(default_factory=dict)
+    #: Polls in a row the BMC has not answered; the status above is the last
+    #: verdict until a few are missed.
+    missed_polls: int = 0
+    last_error: str | None = None
 
 
 class ServerOut(ORMModel):
@@ -213,6 +217,7 @@ class AdminServerOut(ServerDetailOut):
     bmc_protocol: str | None = None
     ipmi_port: int | None = None
     redfish_port: int | None = None
+    ipmi_cipher_suite: str | None = None
     cimc_firmware: str | None
     bios_version: str | None
     rack: str | None
@@ -257,6 +262,7 @@ class ServerUpdate(BaseModel):
     bmc_protocol: str | None = BMCProtocol
     ipmi_port: int | None = Field(default=None, ge=1, le=65535)
     redfish_port: int | None = Field(default=None, ge=1, le=65535)
+    ipmi_cipher_suite: str | None = Field(default=None, pattern=r"^(auto|\d{1,2})$")
     datacenter: str | None = None
     rack: str | None = None
     rack_unit: int | None = Field(default=None, ge=1, le=60)

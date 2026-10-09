@@ -2,11 +2,11 @@ import { HardDrive, Network, RefreshCw } from 'lucide-react'
 import { useState } from 'react'
 import { api } from '../../../api'
 import { Card, Empty, KV, Pill, Spinner, formatTime, label, relativeTime, useNow } from '../../../components'
+import { TARGET_FIRMWARE, firmwareBelowTarget } from '../../../firmware'
 import { waitForJob } from '../../../hooks'
 import { useToast } from '../../../toast'
 import { useServer } from './ServerPage'
 
-const TARGET_FIRMWARE = '4.1(2f)'
 
 export default function Hardware() {
   const { server: s, activeJob, refresh } = useServer()
@@ -59,7 +59,7 @@ export default function Hardware() {
               ['CIMC firmware', s.cimc_firmware ? (
                 <span className="row" style={{ gap: 6 }}>
                   <span className="mono">{s.cimc_firmware}</span>
-                  {s.cimc_firmware !== TARGET_FIRMWARE && <span className="pill warning">not {TARGET_FIRMWARE}</span>}
+                  {firmwareBelowTarget(s.cimc_firmware) && <span className="pill warning">below {TARGET_FIRMWARE}</span>}
                 </span>
               ) : null],
               ['Serial', <span className="mono">{s.serial}</span>],
@@ -67,7 +67,7 @@ export default function Hardware() {
           />
         </Card>
 
-        <Card title="Health" actions={<Pill value={s.health_status} />} note={s.health_checked_at ? `Checked ${relativeTime(s.health_checked_at, now)} (${formatTime(s.health_checked_at)})` : 'Not checked yet.'} flush>
+        <Card title="Health" actions={<Pill value={s.health_status} />} note={s.health_checked_at ? `Checked ${relativeTime(s.health_checked_at, now)} (${formatTime(s.health_checked_at)})${s.health?.missed_polls ? ` · the BMC missed the last ${s.health.missed_polls} poll${s.health.missed_polls > 1 ? 's' : ''}; this is the last verdict` : ''}` : 'Not checked yet.'} flush>
           {subsystems.length === 0 ? (
             <Empty>Nothing collected yet.</Empty>
           ) : (

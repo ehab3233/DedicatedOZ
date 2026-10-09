@@ -2,9 +2,9 @@ import { AlertTriangle, Cpu, HardDrive, Server, Wrench, XCircle } from 'lucide-r
 import { Link } from 'react-router-dom'
 import { api, type AdminServer, type Job } from '../../api'
 import { Card, Empty, PageHeader, Pill, Stat, formatTime, label, relativeTime, useNow } from '../../components'
+import { TARGET_FIRMWARE, firmwareBelowTarget } from '../../firmware'
 import { useAsync, usePolling } from '../../hooks'
 
-const TARGET_FIRMWARE = '4.1(2f)'
 
 export default function Dashboard() {
   const summary = useAsync(() => api.fleetSummary())
@@ -124,8 +124,8 @@ function buildAttention(servers: AdminServer[], jobs: Job[]) {
     if (!s.provisioning_mac && s.state !== 'retired') {
       items.push({ icon: <Server style={{ color: 'var(--warn)' }} />, text: `${s.serial}: no PXE MAC, so reinstalls will refuse`, to: `/admin/servers/${s.id}/hardware`, link: 'Pick a NIC' })
     }
-    if (s.cimc_firmware && s.cimc_firmware !== TARGET_FIRMWARE) {
-      items.push({ icon: <Cpu style={{ color: 'var(--text-3)' }} />, text: `${s.serial}: CIMC ${s.cimc_firmware}, not the ${TARGET_FIRMWARE} baseline`, to: `/admin/servers/${s.id}/bmc`, link: 'BMC' })
+    if (firmwareBelowTarget(s.cimc_firmware)) {
+      items.push({ icon: <Cpu style={{ color: 'var(--text-3)' }} />, text: `${s.serial}: CIMC ${s.cimc_firmware}, below the ${TARGET_FIRMWARE} baseline`, to: `/admin/servers/${s.id}/bmc`, link: 'BMC' })
     }
     if (!s.bmc_prepared_at && s.state !== 'retired') {
       items.push({ icon: <Wrench style={{ color: 'var(--warn)' }} />, text: `${s.serial}: BMC never prepared, so IPMI over LAN, SOL and KVM may still be off`, to: `/admin/servers/${s.id}/bmc`, link: 'Prepare' })

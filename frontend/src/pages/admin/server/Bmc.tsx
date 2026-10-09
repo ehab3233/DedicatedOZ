@@ -1,6 +1,6 @@
-import { Copy, Disc3, KeyRound, Lightbulb, RefreshCw, RotateCcw, Wrench } from 'lucide-react'
+import { Activity, CheckCircle2, Copy, Disc3, KeyRound, Lightbulb, RefreshCw, RotateCcw, Wrench, XCircle } from 'lucide-react'
 import { useState } from 'react'
-import { api, type BmcInfo, type VmediaStatus } from '../../../api'
+import { api, type BmcInfo, type BmcTestReport, type VmediaStatus } from '../../../api'
 import { Banner, Card, Empty, KV, Modal, Pill, Spinner, formatBytes, label, relativeTime, useConfirm, useNow } from '../../../components'
 import { useAsync, usePolling, waitForJob } from '../../../hooks'
 import { useToast } from '../../../toast'
@@ -19,6 +19,7 @@ export default function Bmc() {
   const [busy, setBusy] = useState<string | null>(null)
   const [rotated, setRotated] = useState<{ username: string; password: string; verified: boolean; stored: boolean; error: string | null } | null>(null)
   const [installing, setInstalling] = useState(false)
+  const [test, setTest] = useState<BmcTestReport | null>(null)
 
   const chassis = info.data?.chassis ?? {}
   const policy = chassis.power_restore_policy
@@ -37,6 +38,20 @@ export default function Bmc() {
   async function resetBmc() {
     if (!(await confirm({ title: 'Reset the BMC?', body: 'The CIMC reboots. The server keeps running, but IPMI, Redfish, the consoles and the web UI drop for one to two minutes. Use this when the BMC has stopped answering or the KVM is stuck.', confirmLabel: 'Reset BMC', danger: true }))) return
     await act('reset', () => api.bmcReset(s.id), 'BMC reset sent; give it a minute or two')
+  }
+
+  async function testConnection() {
+    setTest(null)
+    await act('test', async () => {
+      const report = await api.testBmc(s.id)
+      setTest(report)
+      if (report.cipher_saved) {
+        await settings.reload()
+        await refresh()
+      }
+      if (report.ok) toast.ok(report.verdict)
+      else toast.error(report.verdict)
+    })
   }
 
   async function rotatePassword() {
@@ -86,7 +101,11 @@ export default function Bmc() {
   return (
     <>
       <div className="grid cols-2">
-        <Card title="How the platform reaches this BMC" note={settings.data && !settings.data.credential_resolves ? undefined : 'Edit the protocol, ports and credential ref with the Edit button at the top of the page.'}>
+        <Card
+          title="How the platform reaches this BMC"
+          actions={<button className="sm" disabled={busy === 'test'} onClick={testConnection} title="Try HTTPS, the XML API and IPMI with each cipher suite, and show what each said">{busy === 'test' ? <Spinner /> : <Activity />}Test connection</button>}
+          note={settings.data && !settings.data.credential_resolves ? undefined : 'Edit the protocol, ports, cipher suite and credential ref with the Edit button at the top of the page.'}
+        >
           {settings.data && !settings.data.credential_resolves && (
             <Banner kind="error">The credential ref <code>{settings.data.credential_ref}</code> does not resolve. Nothing on this page works until it does.</Banner>
           )}
@@ -94,9 +113,30 @@ export default function Bmc() {
             ['Address', <span className="mono">{s.cimc_ip}</span>],
             ['Protocol', settings.data ? <span>{settings.data.protocol.toUpperCase()} <span className="faint small">{settings.data.protocol === 'auto' ? '(IPMI first, Redfish if IPMI fails)' : ''}</span></span> : null],
             ['Ports', settings.data ? <span className="mono">IPMI {settings.data.ipmi_port} · HTTPS {settings.data.redfish_port}</span> : null],
+            ['Cipher suite', settings.data ? <span>{settings.data.ipmi_cipher_suite} <span className="faint small">· {settings.data.cipher_source === 'server' ? 'set for this server' : 'platform default'}</span></span> : null],
             ['Credential ref', settings.data ? <span className="row" style={{ gap: 6 }}><span className="mono">{settings.data.credential_ref}</span><Pill value={settings.data.credential_resolves ? 'ok' : 'critical'} /></span> : null],
             ['IPMI user', settings.data?.username ? <span className="mono">{settings.data.username}</span> : null],
           ]} />
+          {test && (
+            <div style={{ marginTop: 12 }}>
+              <Banner kind={test.ok ? 'info' : 'error'}>
+                <div>{test.verdict}</div>
+                {test.hint && <div className="small" style={{ marginTop: 4 }}>{test.hint}</div>}
+              </Banner>
+              <div className="stack" style={{ gap: 6, marginTop: 8 }}>
+                {test.checks.map((c) => (
+                  <details key={c.name} className="small">
+                    <summary style={{ display: 'flex', gap: 8, cursor: 'pointer', alignItems: 'flex-start', listStyle: 'none' }}>
+                      {c.ok ? <CheckCircle2 style={{ color: 'var(--ok, #2e9e5b)', flex: 'none' }} /> : <XCircle style={{ color: 'var(--crit)', flex: 'none' }} />}
+                      <span>{c.summary}</span>
+                    </summary>
+                    {c.raw && <pre className="mono small" style={{ whiteSpace: 'pre-wrap', margin: '6px 0 0 24px' }}>{c.raw}</pre>}
+                    {c.hint && <div className="subtle" style={{ margin: '4px 0 0 24px' }}>{c.hint}</div>}
+                  </details>
+                ))}
+              </div>
+            </div>
+          )}
         </Card>
 
         <Card

@@ -69,8 +69,9 @@ export default function Sensors() {
         <span className="subtle small">
           {report ? (
             <>
-              {report.sensors.length} sensors via {report.via.toUpperCase()} · read {relativeTime(report.checked_at, now)}
+              {report.sensors.length} sensors · read {relativeTime(report.checked_at, now)}
               {paused ? ' · paused' : ' · refreshes every 10 s'}
+              {report.stale && <span style={{ color: 'var(--warn)' }}> · the BMC missed the last poll; these are the last good readings</span>}
             </>
           ) : loading ? 'Reading sensors from the BMC…' : ''}
         </span>

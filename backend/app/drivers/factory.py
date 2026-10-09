@@ -26,6 +26,14 @@ def credential_for(server: Server) -> BMCCredential:
     return get_secrets_backend().get_bmc_credential(server.cimc_credential_ref)
 
 
+def cipher_for(server: Server) -> str | None:
+    """The IPMI cipher suite for `server`: None for the platform default, ""
+    to let ipmitool probe, otherwise the suite number."""
+    if server.ipmi_cipher_suite is None:
+        return None
+    return "" if server.ipmi_cipher_suite == "auto" else server.ipmi_cipher_suite
+
+
 def get_driver(
     server: Server,
     *,
@@ -48,6 +56,7 @@ def get_driver(
         credential=credential,
         log=log,
         port=server.ipmi_port,
+        cipher_suite=cipher_for(server),
         timeout=settings.bmc_status_timeout_seconds if interactive else None,
         # One retransmit at one-second spacing: a dead BMC fails in about two
         # seconds instead of twenty (ipmitool's defaults), measured.
@@ -77,4 +86,5 @@ def get_ipmi_driver(server: Server, *, log: LogSink = null_sink) -> IpmiDriver:
         credential=credential_for(server),
         log=log,
         port=server.ipmi_port,
+        cipher_suite=cipher_for(server),
     )

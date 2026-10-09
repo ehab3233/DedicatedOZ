@@ -30,6 +30,28 @@ _lock = threading.Lock()
 
 #: Even a forced refresh waits this long between real reads of one BMC.
 MIN_INTERVAL = 2.0
+#: A read that failed quickly (a lost packet, not a dead BMC) is tried once
+#: more after this pause before anything is reported.
+RETRY_PAUSE = 1.0
+#: server id -> (read at, result) of the last read that worked.
+_last_good: dict[uuid.UUID, tuple[float, dict]] = {}
+
+
+def _with_retry(fn: Callable[[], T]) -> T:
+    """Call `fn`; on a fast BMC failure, once more after a pause.
+
+    IPMI is UDP: one lost datagram is a failed command. A failure that took
+    the whole timeout is a BMC that is not answering, and a second wait
+    would only double the delay, so only quick failures are retried.
+    """
+    started = time.monotonic()
+    try:
+        return fn()
+    except BMCError:
+        if time.monotonic() - started >= settings.bmc_status_timeout_seconds:
+            raise
+        time.sleep(RETRY_PAUSE)
+        return fn()
 
 
 def read_power(db: Session, server: Server, *, fresh: bool = False) -> dict:
@@ -41,17 +63,35 @@ def read_power(db: Session, server: Server, *, fresh: bool = False) -> dict:
             return {**hit[1], "cached": True}
 
     checked_at = datetime.now(UTC).isoformat()
-    try:
+
+    def read() -> tuple[str, str]:
         with get_driver(server, interactive=True) as driver:
-            state = driver.power_status().state
-            via = protocol_label(driver)
-        result = {"state": state, "via": via, "checked_at": checked_at, "error": None}
+            return driver.power_status().state, protocol_label(driver)
+
+    try:
+        state, via = _with_retry(read)
+        result = {
+            "state": state, "via": via, "checked_at": checked_at, "error": None,
+            "stale": False, "last_seen": checked_at,
+        }
+        with _lock:
+            _last_good[server.id] = (time.monotonic(), result)
         if server.last_power_state != state:
             server.last_power_state = state
             db.add(server)
             db.commit()
     except (BMCError, SecretNotFoundError, ValueError) as exc:
-        result = {"state": "unknown", "via": None, "checked_at": checked_at, "error": str(exc)}
+        with _lock:
+            good = _last_good.get(server.id)
+        if good and time.monotonic() - good[0] < settings.bmc_stale_after_seconds:
+            # One missed poll is not an outage: show what we last knew, say
+            # it is old, and keep trying.
+            result = {**good[1], "checked_at": checked_at, "error": str(exc), "stale": True}
+        else:
+            result = {
+                "state": "unknown", "via": None, "checked_at": checked_at, "error": str(exc),
+                "stale": False, "last_seen": good[1]["last_seen"] if good else None,
+            }
 
     with _lock:
         _cache[server.id] = (time.monotonic(), result)
@@ -61,8 +101,11 @@ def read_power(db: Session, server: Server, *, fresh: bool = False) -> dict:
 def forget(server_id: uuid.UUID) -> None:
     with _lock:
         _cache.pop(server_id, None)
+        _last_good.pop(server_id, None)
         for key in [k for k in _live if k[1] == server_id]:
             _live.pop(key, None)
+        for key in [k for k in _errors if k[1] == server_id]:
+            _errors.pop(key, None)
 
 
 def read_power_many(
@@ -98,10 +141,16 @@ T = TypeVar("T")
 
 #: (what, server id) -> (read at, value). Sensors, event log, BMC info.
 _live: dict[tuple[str, uuid.UUID], tuple[float, object]] = {}
+#: (what, server id) -> (failed at, error). A BMC that just refused a session
+#: is left alone for this long: a CIMC holds a session it never got to close
+#: until its own timeout, and retrying every poll only adds to the pile.
+_errors: dict[tuple[str, uuid.UUID], tuple[float, BMCError]] = {}
+ERROR_HOLD_SECONDS = 15.0
 
 
 def cached(what: str, server_id: uuid.UUID, fn: Callable[[], T], *, fresh: bool = False) -> T:
-    """Memoise a live BMC read for `settings.bmc_live_cache_seconds`.
+    """Memoise a live BMC read for `settings.bmc_live_cache_seconds`, and a
+    failed one for `ERROR_HOLD_SECONDS`.
 
     Several people with the same server page open share one IPMI session
     instead of each opening their own against a BMC that allows a handful.
@@ -112,7 +161,33 @@ def cached(what: str, server_id: uuid.UUID, fn: Callable[[], T], *, fresh: bool 
         hit = _live.get(key)
         if hit and not fresh and now - hit[0] < settings.bmc_live_cache_seconds:
             return hit[1]  # type: ignore[return-value]
-    value = fn()
+        failed = _errors.get(key)
+        if failed and not fresh and now - failed[0] < ERROR_HOLD_SECONDS:
+            stale = _stale(key, failed[1], now)
+            if stale is not None:
+                return stale  # type: ignore[return-value]
+            raise failed[1]
+    try:
+        value = _with_retry(fn)
+    except BMCError as exc:
+        with _lock:
+            _errors[key] = (time.monotonic(), exc)
+            stale = _stale(key, exc, time.monotonic())
+        if stale is not None:
+            return stale  # type: ignore[return-value]
+        raise
     with _lock:
         _live[key] = (time.monotonic(), value)
+        _errors.pop(key, None)
     return value
+
+
+def _stale(key: tuple[str, uuid.UUID], exc: BMCError, now: float) -> dict | None:
+    """The last good reading, marked stale, while it is recent enough to show.
+    Caller holds the lock."""
+    hit = _live.get(key)
+    if not hit or not isinstance(hit[1], dict):
+        return None
+    if now - hit[0] >= settings.bmc_stale_after_seconds:
+        return None
+    return {**hit[1], "stale": True, "error": str(exc)}

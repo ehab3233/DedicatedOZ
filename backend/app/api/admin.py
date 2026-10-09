@@ -795,6 +795,7 @@ def _admin_server(db: Session, server: Server) -> AdminServerOut:
             "bmc_protocol": server.bmc_protocol,
             "ipmi_port": server.ipmi_port,
             "redfish_port": server.redfish_port,
+            "ipmi_cipher_suite": server.ipmi_cipher_suite,
             "cimc_firmware": server.cimc_firmware,
             "bios_version": server.bios_version,
             "rack": server.rack,
@@ -812,10 +813,13 @@ def _admin_server(db: Session, server: Server) -> AdminServerOut:
     spec = server.hardware_spec or {}
     out.drives = spec.get("drives", [])
     out.nics = spec.get("nics", [])
+    detail = server.health_detail or {}
     out.health = ServerHealthOut(
         status=server.health_status,
         checked_at=server.health_checked_at,
-        subsystems=server.health_detail or {},
+        subsystems={k: v for k, v in detail.items() if not k.startswith("_")},
+        missed_polls=int(detail.get("_missed_polls") or 0),
+        last_error=detail.get("_last_error") or detail.get("_error"),
     )
 
     subscription = db.execute(

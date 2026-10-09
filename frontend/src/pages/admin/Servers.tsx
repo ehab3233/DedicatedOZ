@@ -3,10 +3,10 @@ import { useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { api, type AdminServer, type PowerAction, type PowerState } from '../../api'
 import { Banner, Card, Dot, Empty, Modal, PageHeader, Pill, relativeTime, useConfirm, useNow } from '../../components'
+import { firmwareBelowTarget } from '../../firmware'
 import { useAsync, usePolling } from '../../hooks'
 import { useToast } from '../../toast'
 
-const TARGET_FIRMWARE = '4.1(2f)'
 const STATES = ['in_stock', 'provisioning', 'active', 'suspended', 'rescue', 'wiping', 'rma', 'retired']
 
 export default function Servers() {
@@ -118,6 +118,7 @@ export default function Servers() {
                         <span className="status-line" title={p?.error ?? (p ? `via ${p.via}` : 'reading…')}>
                           <Dot state={p?.state ?? 'unknown'} pulse={!p} />
                           <span style={{ textTransform: 'capitalize' }}>{p ? (p.state === 'unknown' ? 'Unreachable' : p.state) : '…'}</span>
+                          {p?.stale && <span className="small" style={{ color: 'var(--warn)' }} title={p.error ?? ''}>· last seen {relativeTime(p.last_seen ?? p.checked_at, now)}</span>}
                         </span>
                       </td>
                       <td><Pill value={server.state} /></td>
@@ -132,7 +133,7 @@ export default function Servers() {
                       <td className="mono subtle">{server.cimc_ip}</td>
                       <td className="subtle">
                         {server.cimc_firmware ?? '—'}
-                        {server.cimc_firmware && server.cimc_firmware !== TARGET_FIRMWARE && <span className="pill warning" style={{ marginLeft: 6 }}>off baseline</span>}
+                        {firmwareBelowTarget(server.cimc_firmware) && <span className="pill warning" style={{ marginLeft: 6 }}>below baseline</span>}
                       </td>
                       <td className="subtle">{server.customer_email ?? '—'}</td>
                     </tr>

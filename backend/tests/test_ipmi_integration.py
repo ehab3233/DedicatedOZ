@@ -473,6 +473,17 @@ class TestLiveAdminApi:
     def admin_headers(self, client, make_customer, auth_header):
         return auth_header(make_customer("admin@example.com", admin=True))
 
+    def test_connection_test_against_the_simulator(self, client, sim_server, admin_headers):
+        body = client.post(f"/api/v1/admin/servers/{sim_server.id}/bmc/test",
+                           headers=admin_headers).json()
+        by = {c["name"]: c for c in body["checks"]}
+        assert body["ok"] is True and body["working_cipher"] == "3"
+        assert body["cipher_saved"] is False
+        assert by["ipmi:3"]["ok"] and "Chassis Power is" in by["ipmi:3"]["summary"]
+        # Nothing listens on HTTPS here, and the report says so rather than guessing.
+        assert by["redfish"]["ok"] is False and by["xml_api"]["ok"] is False
+        assert "IPMI works with cipher suite 3" in body["verdict"]
+
     def test_sensors_endpoint(self, client, sim_server, admin_headers):
         from app.services import bmc_status
 

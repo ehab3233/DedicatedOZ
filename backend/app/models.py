@@ -138,6 +138,10 @@ class Server(Base, TimestampMixin):
     #: simulator). Null means 623 and 443.
     ipmi_port: Mapped[int | None] = mapped_column(Integer)
     redfish_port: Mapped[int | None] = mapped_column(Integer)
+    #: IPMI cipher suite for this BMC: a number, "auto" to let ipmitool
+    #: probe, or null for the platform default. Test connection sets it when
+    #: the default does not work.
+    ipmi_cipher_suite: Mapped[str | None] = mapped_column(String(8))
 
     # --- physical ----------------------------------------------------------
     datacenter: Mapped[str | None] = mapped_column(String(64))

@@ -82,10 +82,12 @@ def get_server(
         for n in spec.get("nics", [])
     ]
     detail.ip_addresses = _ip_assignments(db, server)
+    health_detail = server.health_detail or {}
     detail.health = ServerHealthOut(
         status=server.health_status,
         checked_at=server.health_checked_at,
-        subsystems=server.health_detail or {},
+        subsystems={k: v for k, v in health_detail.items() if not k.startswith("_")},
+        missed_polls=int(health_detail.get("_missed_polls") or 0),
     )
     return detail
 

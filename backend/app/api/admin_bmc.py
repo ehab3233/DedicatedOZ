@@ -19,8 +19,9 @@ from app.db import get_db
 from app.deps import client_ip, current_admin
 from app.drivers import BMCError, get_driver
 from app.drivers.cimc import CimcXmlApi
-from app.drivers.factory import credential_for, protocol_for
+from app.drivers.factory import cipher_for, credential_for, protocol_for
 from app.drivers.ipmi import IpmiDriver, ipmitool_path
+from app.drivers.redfish import RedfishDriver
 from app.enums import ActorType, JobType, ServerState
 from app.models import Customer, Image, Job, Server
 from app.schemas import (
@@ -32,7 +33,7 @@ from app.schemas import (
     VmediaBootRequest,
 )
 from app.secrets import BMCCredential, SecretNotFoundError, get_secrets_backend
-from app.services import bmc_status, images
+from app.services import bmc_status, bmc_test, images
 from app.services import jobs as job_service
 from app.services.audit import record_audit
 from app.services.dispatch import enqueue
@@ -69,6 +70,7 @@ def _ipmi(server: Server, *, timeout: int | None = None) -> IpmiDriver:
         host=str(server.cimc_ip),
         credential=credential,
         port=server.ipmi_port,
+        cipher_suite=cipher_for(server),
         timeout=timeout or settings.bmc_status_timeout_seconds,
         retransmit=(1, 1),
     )
@@ -279,10 +281,41 @@ def bmc_settings(server_id: uuid.UUID, db: Session = Depends(get_db)) -> dict:
         "protocol": protocol_for(server),
         "ipmi_port": server.ipmi_port or settings.ipmi_port,
         "redfish_port": server.redfish_port or 443,
+        "ipmi_cipher_suite": bmc_test.effective_cipher(server) or "auto",
+        "cipher_source": "server" if server.ipmi_cipher_suite else "platform",
         "credential_ref": server.cimc_credential_ref,
         "credential_resolves": credential_ok,
         "username": username,
     }
+
+
+@router.post("/servers/{server_id}/bmc/test")
+def test_bmc(
+    server_id: uuid.UUID,
+    request: Request,
+    db: Session = Depends(get_db),
+    admin: Customer = Depends(current_admin),
+) -> dict:
+    """Try every way the platform talks to this BMC and report what each
+    said. A cipher suite that works where the configured one does not is
+    remembered for this server."""
+    server = _server(db, server_id)
+    try:
+        credential = credential_for(server)
+    except (SecretNotFoundError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=f"no CIMC credential: {exc}") from exc
+    report = bmc_test.run(server, credential)
+    report["cipher_saved"] = False
+    working = report["working_cipher"]
+    if working is not None and working != report["configured_cipher"]:
+        server.ipmi_cipher_suite = working
+        db.add(server)
+        bmc_status.forget(server.id)
+        report["cipher_saved"] = True
+    _audit(db, request, admin, server, "server.bmc_test",
+           detail={"ok": report["ok"], "working_cipher": working})
+    db.commit()
+    return report
 
 
 # ---------------------------------------------------------------------------
@@ -413,11 +446,29 @@ def reset_bmc(
     and the consoles drop for a minute or two while it reboots."""
     server = _server(db, server_id)
     driver = _ipmi(server)
-    _bmc_call(lambda: driver.bmc_reset("cold"))
-    _audit(db, request, admin, server, "server.bmc_reset")
+    via = "ipmi"
+    try:
+        driver.bmc_reset("cold")
+    except BMCError as ipmi_error:
+        # The usual reason to reset a BMC is that IPMI has stopped answering,
+        # so the reset itself must not depend on it.
+        redfish = RedfishDriver(
+            host=str(server.cimc_ip), credential=credential_for(server),
+            port=server.redfish_port, timeout=settings.bmc_status_timeout_seconds, retries=1,
+        )
+        try:
+            redfish.manager_reset()
+            via = "redfish"
+        except BMCError as redfish_error:
+            raise HTTPException(
+                status_code=502,
+                detail=f"IPMI: {ipmi_error}. Redfish: {redfish_error}",
+            ) from redfish_error
+    _audit(db, request, admin, server, "server.bmc_reset", detail={"via": via})
     db.commit()
     bmc_status.forget(server.id)
-    return {"reset": "cold", "note": "the BMC is rebooting; expect it back in one to two minutes"}
+    return {"reset": "cold", "via": via,
+            "note": "the BMC is rebooting; expect it back in one to two minutes"}
 
 
 @router.post("/servers/{server_id}/bmc/power-policy")
@@ -487,6 +538,7 @@ def rotate_bmc_password(
     verify = IpmiDriver(
         host=str(server.cimc_ip), credential=BMCCredential(username, new_password),
         port=server.ipmi_port, timeout=15, retransmit=(1, 1),
+        cipher_suite=cipher_for(server),
     )
     error: str | None = None
     try:

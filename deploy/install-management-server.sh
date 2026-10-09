@@ -163,7 +163,7 @@ else
 fi
 apt-get install -y -qq --no-install-recommends \
     git rsync postgresql "$REDIS_PKG" nginx dnsmasq-base \
-    ipmitool libarchive-tools >/dev/null
+    ipmitool libarchive-tools iputils-ping >/dev/null
 note "queue broker: $REDIS_PKG"
 echo "REDIS_UNIT=$REDIS_UNIT" >> "$CONF"
 

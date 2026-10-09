@@ -2,14 +2,14 @@ import { Disc3, HardDriveDownload, LifeBuoy, Trash2 } from 'lucide-react'
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import { api, type BootDevice, type BootFollowUp, type ServerState } from '../../../api'
-import { Card, Empty, KV, Pill, formatTime, label, relativeTime, useConfirm, useNow } from '../../../components'
+import { Banner, Card, Empty, KV, Pill, formatTime, label, relativeTime, useConfirm, useNow } from '../../../components'
+import { TARGET_FIRMWARE, firmwareBelowTarget } from '../../../firmware'
 import { waitForJob } from '../../../hooks'
 import { useToast } from '../../../toast'
 import { AdminReinstallModal, AssignModal, InstallFromImageModal, WipeModal } from './modals'
 import { formatValue, useLiveSensors } from './Sensors'
 import { useServer } from './ServerPage'
 
-const TARGET_FIRMWARE = '4.1(2f)'
 
 //: Legal targets per current state, mirroring SERVER_TRANSITIONS in the backend
 //: so the dropdown only offers moves that will not 409.
@@ -84,12 +84,12 @@ export default function Overview() {
           <Card
             title="Live readings"
             actions={worst ? <Pill value={worst} /> : null}
-            note={sensors.error ? `Sensors unavailable: ${sensors.error}` : sensors.report ? `Read via IPMI ${relativeTime(sensors.report.checked_at, now)} · every 10 s · ${readings.length} sensors on the Sensors tab` : 'Reading sensors…'}
+            note={sensors.error ? 'Sensors need IPMI, which is not answering on this server.' : sensors.report ? `${sensors.report.stale ? 'Last good reading' : 'Read'} ${relativeTime(sensors.report.checked_at, now)} · every 10 s · ${readings.length} sensors on the Sensors tab${sensors.report.stale ? ' · the BMC missed the last poll' : ''}` : 'Reading sensors…'}
           >
-            {readings.length === 0 && !sensors.error ? (
-              <div className="subtle">Waiting for the first reading…</div>
+            {sensors.error ? (
+              <Banner kind="warning">No readings: the BMC is not answering IPMI. <Link to={`/admin/servers/${s.id}/bmc`}>Test the connection</Link> on the BMC tab to see why.</Banner>
             ) : readings.length === 0 ? (
-              <div className="subtle">No readings.</div>
+              <div className="subtle">Waiting for the first reading…</div>
             ) : (
               <div className="readings">
                 {hottest && (
@@ -197,11 +197,11 @@ export default function Overview() {
             )}
           </Card>
 
-          <Card title="Out-of-band">
+          <Card title="Management">
             <KV items={[
-              ['CIMC', <span className="mono">{s.cimc_ip}</span>],
-              ['Control', <span>{(s.bmc_protocol ?? 'auto').toUpperCase()} <span className="faint small">· IPMI :{s.ipmi_port ?? 623} · HTTPS :{s.redfish_port ?? 443}</span></span>],
-              ['Firmware', s.cimc_firmware ? <span className="row" style={{ gap: 6 }}><span className="mono">{s.cimc_firmware}</span>{s.cimc_firmware !== TARGET_FIRMWARE && <span className="pill warning">not {TARGET_FIRMWARE}</span>}</span> : <span className="faint">unknown until inventory sync</span>],
+              ['CIMC', <a className="mono" href={`https://${s.cimc_ip}${s.redfish_port ? `:${s.redfish_port}` : ''}/`} target="_blank" rel="noreferrer" title="Open the CIMC web UI">{s.cimc_ip}</a>],
+              ['Firmware', s.cimc_firmware ? <span className="row" style={{ gap: 6 }}><span className="mono">{s.cimc_firmware}</span>{firmwareBelowTarget(s.cimc_firmware) && <span className="pill warning">below {TARGET_FIRMWARE}</span>}</span> : <span className="faint">unknown until inventory sync</span>],
+              ['Prepared', s.bmc_prepared_at ? <span className="subtle">{relativeTime(s.bmc_prepared_at, now)}</span> : <span className="pill warning">never</span>],
               ['PXE MAC', s.provisioning_mac ? <span className="mono">{s.provisioning_mac}</span> : <span className="pill warning">not set</span>],
               ['Health', <span className="row" style={{ gap: 6 }}><Pill value={s.health_status} /><span className="faint small">{relativeTime(s.health_checked_at, now)}</span></span>],
             ]} />

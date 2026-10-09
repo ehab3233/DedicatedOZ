@@ -346,9 +346,13 @@ restart, so "then reset now" is the default.
 
 **BMC tab.** What the controller says about itself (firmware, IPMI version,
 its own network settings, faults, the power-restore policy, which you can
-change), and the tools: **Prepare BMC** (run for you when the server was
-added; the tab shows when), the locator LED (blink it for a minute so remote
-hands find the box), **Reset BMC** for a CIMC that has
+change), and the tools: **Test connection** (tries HTTPS, the CIMC XML API
+and IPMI with each cipher suite, shows the raw answer from each, and
+remembers a cipher suite that works where the default does not: the first
+thing to click when a server shows "IPMI session failed"), **Prepare BMC**
+(run for you when the server was added; the tab shows when), the locator
+LED (blink it for a minute so remote hands find the box), **Reset BMC** for
+a CIMC that has
 stopped answering (the host keeps running), and **Rotate** for the IPMI
 password. Rotation sets a new 16-character password on the BMC for the user
 the platform logs in as, proves a fresh session works with it, then stores

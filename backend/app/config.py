@@ -85,6 +85,14 @@ class Settings(BaseSettings):
     # event log carries real timestamps. Empty leaves the CIMC's clock alone.
     ntp_servers: str = ""
 
+    # A BMC that misses one poll is not down. Live reads retry once, and the
+    # last good reading is shown (marked stale) for this long before the
+    # panel calls the server unreachable; the health sweep likewise keeps the
+    # last verdict through a few missed polls. Lossy links to a CIMC on a
+    # routed VLAN otherwise flap between "off" and "unreachable" all day.
+    bmc_stale_after_seconds: int = 90
+    health_failures_before_unknown: int = 3
+
     # Live sensor, event-log and BMC-info reads for the panel are cached this
     # long, so several open tabs share one BMC round trip instead of each
     # starting their own IPMI session.

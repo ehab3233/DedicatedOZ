@@ -97,9 +97,13 @@ export function PowerBadge({ state, loading, onRefresh }: {
       <span className="strong" style={{ textTransform: 'capitalize' }}>
         {loading && !state ? 'Checking…' : s === 'unknown' ? 'Unknown' : `Power ${s}`}
       </span>
-      {state?.via && (
-        <span className="faint small">
-          {state.via.toUpperCase()} · {relativeTime(state.checked_at, now)}
+      {state?.stale ? (
+        <span className="small" style={{ color: 'var(--warn)' }} title={state.error ?? ''}>
+          last seen {relativeTime(state.last_seen ?? state.checked_at, now)} · the BMC missed the last poll, retrying
+        </span>
+      ) : state?.via && (
+        <span className="faint small" title={`Read over ${state.via.toUpperCase()}`}>
+          {relativeTime(state.checked_at, now)}
         </span>
       )}
       <button className="ghost icon sm" onClick={onRefresh} disabled={loading} title="Read from the BMC now">

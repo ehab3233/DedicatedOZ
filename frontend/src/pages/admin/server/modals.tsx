@@ -215,6 +215,7 @@ export function EditModal({ server, onClose, onDone }: { server: AdminServer; on
     cimc_credential_ref: server.cimc_credential_ref,
     cimc_ip: server.cimc_ip,
     bmc_protocol: server.bmc_protocol ?? '',
+    ipmi_cipher_suite: server.ipmi_cipher_suite ?? '',
     ipmi_port: server.ipmi_port?.toString() ?? '',
     redfish_port: server.redfish_port?.toString() ?? '',
     notes: server.notes ?? '',
@@ -233,7 +234,7 @@ export function EditModal({ server, onClose, onDone }: { server: AdminServer; on
           rack_unit: form.rack_unit ? Number(form.rack_unit) : null, switch_name: form.switch_name || null,
           switch_port: form.switch_port || null, customer_vlan: form.customer_vlan ? Number(form.customer_vlan) : null,
           provisioning_mac: form.provisioning_mac || null, cimc_credential_ref: form.cimc_credential_ref, cimc_ip: form.cimc_ip,
-          bmc_protocol: form.bmc_protocol || null, ipmi_port: form.ipmi_port ? Number(form.ipmi_port) : null,
+          bmc_protocol: form.bmc_protocol || null, ipmi_cipher_suite: form.ipmi_cipher_suite || null, ipmi_port: form.ipmi_port ? Number(form.ipmi_port) : null,
           redfish_port: form.redfish_port ? Number(form.redfish_port) : null, notes: form.notes || null,
         })
         return 'Saved'
@@ -251,6 +252,15 @@ export function EditModal({ server, onClose, onDone }: { server: AdminServer; on
             <option value="auto">Auto — IPMI, then Redfish</option>
             <option value="ipmi">IPMI only</option>
             <option value="redfish">Redfish only</option>
+          </select>
+        </div>
+        <div className="field">
+          <label>IPMI cipher suite</label>
+          <select value={form.ipmi_cipher_suite} onChange={set('ipmi_cipher_suite')}>
+            <option value="">Platform default</option>
+            <option value="3">3 (SHA1, AES)</option>
+            <option value="17">17 (SHA256, AES)</option>
+            <option value="auto">Let ipmitool probe (slow)</option>
           </select>
         </div>
         <div className="field"><label>IPMI port (blank = 623)</label><input type="number" min={1} max={65535} value={form.ipmi_port} onChange={set('ipmi_port')} /></div>

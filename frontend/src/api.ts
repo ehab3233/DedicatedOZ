@@ -104,6 +104,9 @@ export interface ServerDetail extends Server {
     status: string | null
     checked_at: string | null
     subsystems: Record<string, { status?: string; detail?: unknown }>
+    /** Polls in a row the BMC has not answered; `status` is the last verdict. */
+    missed_polls?: number
+    last_error?: string | null
   } | null
 }
 
@@ -142,6 +145,25 @@ export interface OSTemplate {
   version: string
   install_method: string
   default_raid_level: string
+}
+
+export interface BmcTestCheck {
+  name: string
+  ok: boolean
+  summary: string
+  raw: string
+  hint: string | null
+}
+
+export interface BmcTestReport {
+  ok: boolean
+  checks: BmcTestCheck[]
+  facts: Record<string, string | boolean | null>
+  configured_cipher: string
+  working_cipher: string | null
+  cipher_saved: boolean
+  verdict: string
+  hint: string | null
 }
 
 export interface NetbootFile {
@@ -193,6 +215,7 @@ export interface AdminServer extends ServerDetail {
   bmc_protocol: string | null
   ipmi_port: number | null
   redfish_port: number | null
+  ipmi_cipher_suite: string | null
   cimc_firmware: string | null
   bios_version: string | null
   rack: string | null
@@ -404,6 +427,8 @@ export const api = {
   // --- admin: BMC ---
   prepareBmc: (id: string) =>
     request<Job>(`/api/v1/admin/servers/${id}/prepare-bmc`, { method: 'POST' }),
+  testBmc: (id: string) =>
+    request<BmcTestReport>(`/api/v1/admin/servers/${id}/bmc/test`, { method: 'POST' }),
   launchKvm: (id: string) =>
     request<{
       html5: string | null
@@ -421,6 +446,8 @@ export const api = {
       protocol: string
       ipmi_port: number
       redfish_port: number
+      ipmi_cipher_suite: string
+      cipher_source: string
       credential_ref: string
       credential_resolves: boolean
       username: string | null
@@ -597,6 +624,9 @@ export interface PowerState {
   checked_at: string
   error: string | null
   cached: boolean
+  /** The BMC missed the last poll; `state` is the last good reading, from `last_seen`. */
+  stale?: boolean
+  last_seen?: string | null
 }
 
 export interface SystemStatus {
@@ -634,6 +664,9 @@ export interface SensorReport {
   power: { watts: number; minimum: number | null; maximum: number | null; average: number | null } | null
   checked_at: string
   via: string
+  /** The BMC missed the last poll; these are the last good readings. */
+  stale?: boolean
+  error?: string
 }
 
 export interface SelEntry {

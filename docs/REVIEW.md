@@ -242,7 +242,14 @@ else.
    tested against recorded request shapes, not a real CIMC: the first three
    settings have run on a real M4, the rest have not yet. If one is rejected,
    the job log shows the CIMC's error and lists it at the end; the web UI can
-   do the same by hand.
+   do the same by hand. IPMI itself is pinned to cipher suite 3; newer CIMC
+   builds prefer 17 and may stop accepting 3. **Test connection** on the BMC
+   tab pings the CIMC, then tries HTTPS, the XML API and IPMI with 3, 17 and
+   ipmitool's probe, shows each raw answer, and stores a working suite per
+   server. Reset BMC falls back to Redfish Manager.Reset, so a CIMC whose
+   IPMI service has wedged can still be rebooted from the panel. Live reads
+   retry once and keep the last good reading (marked stale) for 90 seconds,
+   so a lossy link does not flap the panel between off and unreachable.
 
 7. **The HTML5 KVM viewer's URL.** The one-time token call
    (`aaaGetComputeAuthTokens`) is documented; the path of the HTML5 viewer

@@ -394,5 +394,7 @@ def _redact_xml(text: str) -> str:
     """Strip passwords and session material from logged XML."""
     import re
 
-    text = re.sub(r'(inPassword|outCookie|cookie|inCookie|outTokens)="[^"]*"', r'\1="***"', text)
+    text = re.sub(
+        r'(inPassword|outCookie|cookie|inCookie|outTokens|key)="[^"]*"', r'\1="***"', text
+    )
     return text

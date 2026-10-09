@@ -811,11 +811,24 @@ def _poll_health(db: Session, server: Server, sink: LogSink = null_sink) -> dict
     except BMCError as exc:
         # A BMC that stopped answering is itself the alert, so it is recorded
         # rather than raised — a dead CIMC must not stall the whole sweep.
-        server.health_status = "unknown"
-        server.health_detail = {"error": str(exc)}
+        # One missed poll on a lossy link is not that: the last verdict
+        # stands, with the miss noted, until a few polls in a row have failed.
+        detail = dict(server.health_detail or {})
+        missed = int(detail.get("_missed_polls") or 0) + 1
         server.health_checked_at = datetime.now(UTC)
+        if (
+            server.health_status not in (None, "unknown")
+            and missed < settings.health_failures_before_unknown
+        ):
+            detail["_missed_polls"] = missed
+            detail["_last_error"] = str(exc)
+            server.health_detail = detail
+            db.add(server)
+            return {"status": server.health_status, "missed_polls": missed, "error": str(exc)}
+        server.health_status = "unknown"
+        server.health_detail = {"_error": str(exc), "_missed_polls": missed}
         db.add(server)
-        return {"status": "unknown", "error": str(exc)}
+        return {"status": "unknown", "missed_polls": missed, "error": str(exc)}
 
     server.health_status = health.status
     server.health_detail = health.subsystems

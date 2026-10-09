@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import time
 from typing import Any
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 import requests
 import urllib3
@@ -61,6 +61,27 @@ BOOT_TARGETS: dict[str, str] = {
 }
 
 _REDACTED = "***"
+
+
+def _redfish_message(body: Any) -> str:
+    """The readable reason in a Redfish error body, if there is one.
+
+    `error.@Message.ExtendedInfo[].Message` is where a BMC says what was
+    actually wrong; `error.message` is usually only "A general error has
+    occurred".
+    """
+    if not isinstance(body, dict):
+        return ""
+    error = body.get("error") if isinstance(body.get("error"), dict) else body
+    messages: list[str] = []
+    for info in error.get("@Message.ExtendedInfo") or []:
+        if isinstance(info, dict):
+            text = str(info.get("Message") or info.get("MessageId") or "").strip()
+            if text and text not in messages:
+                messages.append(text)
+    if not messages and error.get("message"):
+        messages.append(str(error["message"]).strip())
+    return "; ".join(messages)[:500]
 
 
 def _redact(payload: Any) -> Any:
@@ -245,8 +266,9 @@ class RedfishDriver(BMCDriver):
             if retryable and attempt < attempts:
                 time.sleep(min(2 ** attempt, 15))
                 continue
+            reason = _redfish_message(body)
             raise BMCError(
-                f"{method} {path} returned {resp.status_code}",
+                f"{method} {path} returned {resp.status_code}" + (f": {reason}" if reason else ""),
                 request=req_record,
                 response=resp_record,
                 retryable=retryable,
@@ -288,6 +310,22 @@ class RedfishDriver(BMCDriver):
 
     def service_root(self) -> dict:
         return self._get("/redfish/v1/")
+
+    def manager_reset(self) -> str:
+        """Reboot the BMC itself (Manager.Reset); the host keeps running.
+        Returns the reset type used."""
+        manager = self._get(self.manager_path)
+        action = manager.get("Actions", {}).get("#Manager.Reset", {})
+        target = action.get("target") or f"{self.manager_path}/Actions/Manager.Reset"
+        allowed = action.get("ResetType@Redfish.AllowableValues") or []
+        reset_type = next(
+            (t for t in ("ForceRestart", "GracefulRestart") if not allowed or t in allowed),
+            allowed[0] if allowed else "ForceRestart",
+        )
+        self._request(
+            "POST", target, json_body={"ResetType": reset_type}, expect=(200, 202, 204)
+        )
+        return reset_type
 
     # -- power -------------------------------------------------------------
 
@@ -446,11 +484,17 @@ class RedfishDriver(BMCDriver):
             resource.get("Actions", {}).get("#VirtualMedia.InsertMedia", {}).get("target")
         )
         if insert_action:
-            self._request(
-                "POST",
-                insert_action,
-                json_body={"Image": image_url, "Inserted": True, "WriteProtected": True},
-            )
+            # The CIMC wants the transport named as well as the URL (its
+            # vMedia mount types are NFS, CIFS and WWW); other BMCs ignore it.
+            scheme = urlparse(image_url).scheme.lower()
+            protocol = {"http": "HTTP", "https": "HTTPS", "nfs": "NFS", "cifs": "CIFS",
+                        "smb": "CIFS"}.get(scheme)
+            body: dict[str, Any] = {
+                "Image": image_url, "Inserted": True, "WriteProtected": True,
+            }
+            if protocol:
+                body["TransferProtocolType"] = protocol
+            self._request("POST", insert_action, json_body=body)
         else:
             # Cisco quirk: pre-4.1 CIMC omits the InsertMedia action and
             # expects a PATCH of the Image property instead.

@@ -9,6 +9,8 @@ possible way if the driver trusts what it is told.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 import responses
 
@@ -240,7 +242,42 @@ class TestVirtualMedia:
         )
 
         driver().insert_virtual_media("http://10.10.0.5:8080/iso/rocky-9.iso")
-        assert any("InsertMedia" in c.request.url for c in responses.calls)
+        post = next(c for c in responses.calls if "InsertMedia" in c.request.url)
+        body = json.loads(post.request.body)
+        assert body["Image"] == "http://10.10.0.5:8080/iso/rocky-9.iso"
+        assert body["TransferProtocolType"] == "HTTP"  # the CIMC refuses without it
+        assert body["Inserted"] is True and body["WriteProtected"] is True
+
+    @responses.activate
+    def test_a_rejected_insert_says_what_the_bmc_objected_to(self):
+        self._register(
+            {
+                "@odata.id": self.VM_CD,
+                "MediaTypes": ["CD", "DVD"],
+                "Inserted": False,
+                "Actions": {
+                    "#VirtualMedia.InsertMedia": {
+                        "target": f"{self.VM_CD}/Actions/VirtualMedia.InsertMedia"
+                    }
+                },
+            }
+        )
+        responses.add(
+            responses.POST,
+            f"{BASE}{self.VM_CD}/Actions/VirtualMedia.InsertMedia",
+            status=400,
+            json={"error": {
+                "code": "Base.1.4.GeneralError",
+                "message": "A general error has occurred. See ExtendedInfo for more information.",
+                "@Message.ExtendedInfo": [{
+                    "MessageId": "Base.1.4.PropertyValueFormatError",
+                    "Message": "The value http://10.10.0.5:8080/iso/rocky-9.iso for the property "
+                               "Image is of a different format than the property can accept.",
+                }],
+            }},
+        )
+        with pytest.raises(BMCError, match="returned 400: The value .* property Image"):
+            driver().insert_virtual_media("http://10.10.0.5:8080/iso/rocky-9.iso")
 
     @responses.activate
     def test_insert_falls_back_to_patch_on_older_firmware(self):
