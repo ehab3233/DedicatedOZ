@@ -30,7 +30,20 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-WORK="$(mktemp -d)"
+# Assemble the root where device files work. Ubuntu 25.10 and later mount
+# /tmp as tmpfs with nodev: /dev/null in the new root then cannot be opened,
+# and every package script line that writes to it is silently skipped.
+mkdir -p "$OUT_DIR"
+WORK=""
+for base in "${DOZ_RAMDISK_WORKDIR:-}" /var/tmp "$(cd "$OUT_DIR/.." && pwd)" "${TMPDIR:-/tmp}"; do
+    [ -n "$base" ] && [ -d "$base" ] || continue
+    if command -v findmnt >/dev/null 2>&1 \
+        && findmnt -no OPTIONS -T "$base" 2>/dev/null | tr ',' '\n' | grep -qx nodev; then
+        continue
+    fi
+    WORK="$(mktemp -d "$base/doz-ramdisk.XXXXXX")" && break
+done
+[ -n "$WORK" ] || WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
 echo "==> building rootfs from alpine:$ALPINE_VERSION"
