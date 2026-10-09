@@ -307,6 +307,8 @@ DOZ_TRUST_PROXY_HEADERS=true
 DOZ_CORS_ORIGINS=http://${MGMT_IP}
 
 DOZ_INSTALLER_TEMPLATE_DIR=${INSTALL_DIR}/installer/templates
+# What nginx serves at http://${MGMT_IP}:8080/: ramdisk, kernels, initrds, ISOs.
+DOZ_BOOT_ASSET_DIR=${INSTALL_DIR}/installer/assets
 # ISO image store, served to BMCs at http://${MGMT_IP}:8080/iso/
 DOZ_IMAGE_DIR=${INSTALL_DIR}/installer/assets/iso
 # Prepare BMC: persistent boot order it sets (disk,pxe | pxe,disk | empty = leave)
@@ -637,7 +639,7 @@ fi
 
 if [ "$WITH_DOCKER" -eq 1 ]; then
     say "installer ramdisk"
-    "$INSTALL_DIR/installer/build-ramdisk.sh" --out "$INSTALL_DIR/installer/assets/doz-installer" || \
+    bash "$INSTALL_DIR/installer/build-ramdisk.sh" --out "$INSTALL_DIR/installer/assets/doz-installer" || \
         note "ramdisk build failed; see installer/README.md"
     chown -R doz:doz "$INSTALL_DIR/installer/assets"
 fi
@@ -709,7 +711,8 @@ cat <<SUMMARY
 
  Before the first reinstall:
    1. sudo -u doz $INSTALL_DIR/deploy/fetch-os-images.sh   (or --fetch-images)
-   2. sudo $INSTALL_DIR/doz.sh ramdisk                     (needs docker)
+   2. sudo $INSTALL_DIR/doz.sh ramdisk                     (installs docker if needed)
+   Both show on the panel's Images page under Netboot images.
    3. docs/GETTING-STARTED.md for CIMC setup and the first server
 SUMMARY
 

@@ -20,8 +20,8 @@ from app.db import get_db
 from app.deps import client_ip, current_admin
 from app.enums import ActorType, JobType
 from app.models import Customer, Image
-from app.schemas import ImageFetchRequest, ImageOut, ImageUpdate, JobOut
-from app.services import images
+from app.schemas import ImageFetchRequest, ImageOut, ImageUpdate, JobOut, NetbootReportOut
+from app.services import boot_assets, images
 from app.services import jobs as job_service
 from app.services.audit import record_audit
 from app.services.dispatch import enqueue
@@ -56,6 +56,14 @@ def _audit(db: Session, request: Request, admin: Customer, action: str, image: I
 def list_images(db: Session = Depends(get_db)) -> list[ImageOut]:
     rows = db.execute(select(Image).order_by(Image.name, Image.created_at)).scalars().all()
     return [_out(image) for image in rows]
+
+
+@router.get("/netboot", response_model=NetbootReportOut)
+def netboot_assets(db: Session = Depends(get_db)) -> dict:
+    """The files PXE reinstalls boot (ramdisk, kernels, initrds, the Ubuntu
+    ISO) and whether each is on disk. fetch-os-images.sh and `doz.sh ramdisk`
+    put them there; this is how the panel shows what they did."""
+    return boot_assets.report(db)
 
 
 @router.put("/upload", response_model=ImageOut, status_code=status.HTTP_201_CREATED)

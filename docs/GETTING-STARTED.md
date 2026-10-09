@@ -140,8 +140,15 @@ and a couple of gigabytes, which is why they are separate:
 ```sh
 cd /opt/doz
 sudo -u doz ./deploy/fetch-os-images.sh          # Ubuntu 22.04, Debian 12, Rocky 9
-sudo apt install -y docker.io && sudo ./doz.sh ramdisk    # the installer image
+sudo ./doz.sh ramdisk                            # the installer ramdisk (installs docker)
 ```
+
+Neither shows up as an "image" you click on: they are the files a PXE
+reinstall boots. The **Images** page lists them under **Netboot images**,
+per OS template, with anything missing marked, and a reinstall refuses to
+start while a file it needs is missing. The Ubuntu ISO the first script
+downloads is also linked into the ISO store; **Scan directory** on the same
+page catalogues it for virtual-media installs.
 
 StorCLI is not included in the ramdisk unless you supply it — Broadcom does not
 allow redistribution. Download `storcli` for Linux from Broadcom's site and

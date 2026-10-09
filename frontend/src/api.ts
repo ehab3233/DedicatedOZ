@@ -144,6 +144,33 @@ export interface OSTemplate {
   default_raid_level: string
 }
 
+export interface NetbootFile {
+  role: string
+  path: string
+  url: string
+  present: boolean
+  size_bytes: number | null
+  modified_at: string | null
+}
+
+export interface NetbootTemplate {
+  id: string
+  slug: string
+  name: string
+  version: string
+  install_method: string
+  is_public: boolean
+  files: NetbootFile[]
+  ready: boolean
+}
+
+export interface NetbootReport {
+  asset_dir: string
+  base_url: string
+  ramdisk: { files: NetbootFile[]; ready: boolean }
+  templates: NetbootTemplate[]
+}
+
 export interface SSHKey {
   id: string
   name: string
@@ -314,6 +341,7 @@ export const api = {
   cancelJob: (id: string) => request<Job>(`/api/v1/jobs/${id}/cancel`, { method: 'POST' }),
 
   osTemplates: () => request<OSTemplate[]>('/api/v1/os-templates'),
+  netboot: () => request<NetbootReport>('/api/v1/admin/images/netboot'),
 
   sshKeys: () => request<SSHKey[]>('/api/v1/ssh-keys'),
   addSshKey: (name: string, publicKey: string) =>

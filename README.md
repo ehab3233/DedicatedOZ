@@ -25,7 +25,7 @@ gateways, and none of it is a differentiator.
 | Sensors | Every sensor the BMC has, read live every 10 s while the page is open: temperatures, fans, voltages, PSU and power draw |
 | Event log | The BMC's System Event Log with sensor names resolved, severity, and a clear button |
 | Boot device | One-time boot from PXE, disk, CD/virtual media or BIOS setup, with the reset or power cycle that makes it take effect |
-| Images | ISO store on the management server: upload from the browser, fetch from a URL, or scan a directory. **Install from image** mounts one as virtual media on the BMC and boots it |
+| Images | ISO store on the management server: upload from the browser, fetch from a URL, or scan a directory. **Install from image** mounts one as virtual media on the BMC and boots it. The same page shows the netboot files each OS template and the installer ramdisk need, and which are missing |
 | BMC tools | Locator LED, cold BMC reset, power-restore policy, IPMI user list, IPMI password rotation (set on the BMC, verified with a fresh session, stored) |
 | Reinstall | iPXE → ramdisk → StorCLI RAID → kickstart/autoinstall/preseed → phone home |
 | Rescue | Same rail, boots to RAM, disks untouched |
@@ -257,7 +257,7 @@ Log in as an admin and open **Manage**:
 | Server → Network | Addresses, switch port and VLAN, what the BMC says about its own network. |
 | Server → Jobs | Everything that has run on this server. |
 | Server → BMC | How the platform reaches it, controller details, power-restore policy, Prepare BMC, locator LED, BMC reset, password rotation, virtual media, IPMI users. |
-| Images | The ISO store: upload, fetch from URL, scan, delete. |
+| Images | The ISO store: upload, fetch from URL, scan, delete. Below it, the netboot files (ramdisk, kernels, initrds) with what is missing. |
 | Customers | Create accounts, generate initial passwords, disable logins, see and end subscriptions. |
 | IP space | Add blocks with gateways and provenance, see utilisation, find free addresses. |
 | Jobs | Everything that has run, filterable by state, with raw BMC exchanges. |

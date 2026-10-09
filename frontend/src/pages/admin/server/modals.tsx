@@ -71,6 +71,8 @@ export function AssignModal({ serverId, onClose, onDone }: { serverId: string; o
 
 export function AdminReinstallModal({ serverId, customerEmail, onClose, onDone }: { serverId: string; customerEmail: string | null; onClose: () => void; onDone: Done }) {
   const templates = useAsync<OSTemplate[]>(() => api.osTemplates())
+  const netboot = useAsync(() => api.netboot())
+  const notReady = new Set((netboot.data?.templates ?? []).filter((t) => !t.ready).map((t) => t.id))
   const [templateId, setTemplateId] = useState('')
   const [hostname, setHostname] = useState('')
   const [raid, setRaid] = useState('raid1')
@@ -90,6 +92,9 @@ export function AdminReinstallModal({ serverId, customerEmail, onClose, onDone }
     >
       <Banner kind="error">Erases every disk on the server.</Banner>
       {error && <Banner kind="error">{error}</Banner>}
+      {netboot.data && !netboot.data.ramdisk.ready && (
+        <Banner kind="warning">The installer ramdisk is not built, so nothing can be reinstalled yet: run <code>sudo /opt/doz/doz.sh ramdisk</code> on the management server. The <Link to="/admin/images">Images</Link> page lists what is missing.</Banner>
+      )}
       <Banner kind="info">
         {customerEmail ? <>SSH keys from <strong>{customerEmail}</strong>'s account are installed.</> : <>Unassigned server: no customer keys. Set a root password below or the install is unreachable.</>}
       </Banner>
@@ -97,7 +102,7 @@ export function AdminReinstallModal({ serverId, customerEmail, onClose, onDone }
         <label htmlFor="os">Operating system</label>
         <select id="os" value={templateId} onChange={(e) => setTemplateId(e.target.value)}>
           <option value="">Choose…</option>
-          {(templates.data ?? []).map((t) => <option key={t.id} value={t.id}>{t.name} {t.version}</option>)}
+          {(templates.data ?? []).map((t) => <option key={t.id} value={t.id} disabled={notReady.has(t.id)}>{t.name} {t.version}{notReady.has(t.id) ? ' (files missing on the management server)' : ''}</option>)}
         </select>
       </div>
       <div className="grid cols-2">

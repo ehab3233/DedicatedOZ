@@ -26,6 +26,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.models import Image
+from app.services import boot_assets
 
 CHUNK = 1024 * 1024
 IMAGE_SUFFIXES = (".iso", ".img")
@@ -38,7 +39,7 @@ def image_dir() -> Path:
     if settings.image_dir:
         path = Path(settings.image_dir)
     else:
-        path = Path(__file__).resolve().parents[3] / "installer" / "assets" / "iso"
+        path = boot_assets.asset_dir() / "iso"
     path.mkdir(parents=True, exist_ok=True)
     return path
 

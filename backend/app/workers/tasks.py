@@ -24,8 +24,8 @@ from app.drivers.factory import credential_for
 from app.drivers.fallback import FallbackDriver, protocol_label
 from app.drivers.redfish import RedfishDriver
 from app.enums import ActorType, JobState, JobType, PowerAction, ServerState
-from app.models import Image, Job, Server
-from app.services import images
+from app.models import Image, Job, OSTemplate, Server
+from app.services import boot_assets, images
 from app.services import jobs as job_service
 from app.services.dispatch import enqueue
 from app.services.lifecycle import IllegalTransition, transition_server
@@ -583,6 +583,20 @@ def _netboot_into_ramdisk(db: Session, job: Job, server: Server, driver) -> None
     fetches is chosen by `services.boot` from this same job row, which is why
     the three rails differ only in what happens after this point.
     """
+    # Refuse before touching the server if a file the boot would fetch is not
+    # there: a 404 from iPXE leaves the machine sitting at a prompt with no
+    # OS, and the job waiting until it times out.
+    template = None
+    if (job.payload or {}).get("os_template_id"):
+        template = db.get(OSTemplate, job.payload["os_template_id"])
+    missing = boot_assets.missing_for(template)
+    if missing:
+        raise RuntimeError(
+            "not on the management server: " + ", ".join(missing)
+            + ". Fetch them with: sudo -u doz /opt/doz/deploy/fetch-os-images.sh "
+            "and sudo /opt/doz/doz.sh ramdisk (the Images page lists what is missing)"
+        )
+
     job_service.set_stage(db, job, "setting one-time PXE boot", progress=5)
     db.commit()
     driver.set_boot_once("pxe")

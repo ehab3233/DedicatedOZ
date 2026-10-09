@@ -91,9 +91,13 @@ class Settings(BaseSettings):
     bmc_live_cache_seconds: int = 3
 
     # --- images ------------------------------------------------------------
-    # Where uploaded ISO images live. Empty means <repo>/installer/assets/iso,
-    # which nginx serves at {boot_asset_base_url}/iso/ on the management
-    # server -- the URL the BMC fetches virtual media from.
+    # The directory nginx serves at boot_asset_base_url: the installer
+    # ramdisk, the OS templates' kernels and initrds, the ISO store. Empty
+    # means <repo>/installer/assets.
+    boot_asset_dir: str = ""
+    # Where uploaded ISO images live. Empty means <boot_asset_dir>/iso, which
+    # nginx serves at {boot_asset_base_url}/iso/ -- the URL the BMC fetches
+    # virtual media from.
     image_dir: str = ""
 
     # --- provisioning ------------------------------------------------------

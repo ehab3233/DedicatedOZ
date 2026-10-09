@@ -62,6 +62,15 @@ if want ubuntu; then
     else
         echo "  keeping casper/vmlinuz, casper/initrd"
     fi
+    # The same ISO installs by hand through virtual media, so make it show in
+    # the panel's ISO store too. A hard link costs nothing; a symlink if the
+    # store is on another filesystem.
+    store="$ASSETS/iso/$(basename "$iso")"
+    if [ ! -e "$store" ]; then
+        mkdir -p "$ASSETS/iso"
+        ln "$iso" "$store" 2>/dev/null || ln -s "$iso" "$store"
+        echo "  linked into the ISO store as iso/$(basename "$iso"); catalogue it with Scan directory on the Images page"
+    fi
 fi
 
 if want debian; then
@@ -80,5 +89,6 @@ echo
 say "done"
 du -sh "$ASSETS/os"/* 2>/dev/null || true
 echo
-echo "These are served from \$DOZ_BOOT_ASSET_BASE_URL. The installer ramdisk"
-echo "itself is built separately: ./doz.sh ramdisk"
+echo "These are served from \$DOZ_BOOT_ASSET_BASE_URL and listed on the panel's"
+echo "Images page under Netboot images. The installer ramdisk itself is built"
+echo "separately: sudo ./doz.sh ramdisk"

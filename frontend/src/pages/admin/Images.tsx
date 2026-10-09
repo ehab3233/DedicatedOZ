@@ -1,7 +1,7 @@
-import { Download, FolderSearch, Trash2, Upload } from 'lucide-react'
+import { Download, FolderSearch, Network, RefreshCw, Trash2, Upload } from 'lucide-react'
 import { useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { api, uploadImage, type Image } from '../../api'
+import { api, uploadImage, type Image, type NetbootFile } from '../../api'
 import { Banner, Card, Empty, Modal, PageHeader, Pill, Progress, formatBytes, formatTime, relativeTime, useConfirm, useNow } from '../../components'
 import { useAsync, usePolling, waitForJob } from '../../hooks'
 import { useToast } from '../../toast'
@@ -32,7 +32,7 @@ export default function Images() {
     <main className="page">
       <PageHeader
         title="Images"
-        sub="ISO images on the management server. A server installs from one by mounting it as virtual media on its BMC and booting from it."
+        sub="ISO images on the management server, which a server installs from as virtual media on its BMC, and the netboot files a PXE reinstall boots."
         actions={
           <>
             <button onClick={scan} title="Catalogue ISOs copied into the image directory by hand"><FolderSearch />Scan directory</button>
@@ -49,7 +49,7 @@ export default function Images() {
         {!images.data ? (
           <Empty>Loading…</Empty>
         ) : images.data.length === 0 ? (
-          <Empty>No images yet. Upload an ISO above, fetch one from a URL, or copy files into the image directory and scan.</Empty>
+          <Empty>No ISO images yet. Upload one above, fetch one from a URL, or copy files into the image directory and scan. The kernels and initrds PXE reinstalls use are listed below, not here.</Empty>
         ) : (
           <div className="table-scroll">
             <table>
@@ -83,10 +83,91 @@ export default function Images() {
         Images are served to BMCs over plain HTTP from the boot-asset port. To use one, open a server and choose <strong>Install from image</strong>. <Link to="/admin/servers">Servers</Link>
       </p>
 
+      <NetbootCard />
+
       {fetching && (
         <FetchModal onClose={() => setFetching(false)} onQueued={async () => { setFetching(false); await images.reload() }} />
       )}
     </main>
+  )
+}
+
+/**
+ * What Reinstall, Rescue and Wipe boot over PXE. These are files on disk,
+ * put there by fetch-os-images.sh and doz.sh ramdisk, not catalogue rows;
+ * this is the only place the panel shows whether they exist.
+ */
+function NetbootCard() {
+  const report = useAsync(() => api.netboot())
+  const now = useNow()
+  const r = report.data
+  const anyMissing = r ? !r.ramdisk.ready || r.templates.some((t) => !t.ready) : false
+  return (
+    <Card
+      title="Netboot images"
+      icon={<Network />}
+      flush
+      actions={<button className="ghost icon sm" onClick={() => report.reload()} title="Re-check the files"><RefreshCw /></button>}
+      note={r ? `What a PXE reinstall, rescue or wipe boots: files under ${r.asset_dir}, served at ${r.base_url}/.` : 'Checking the files on disk…'}
+    >
+      {report.error ? (
+        <Empty>{report.error}</Empty>
+      ) : !r ? (
+        <Empty>Checking…</Empty>
+      ) : (
+        <>
+          <div className="table-scroll">
+            <table className="compact">
+              <thead><tr><th>Boots</th><th>Files on the management server</th><th>Status</th></tr></thead>
+              <tbody>
+                <tr>
+                  <td><strong>Installer ramdisk</strong><div className="cell-sub">First on every rail; built by doz.sh ramdisk</div></td>
+                  <td><FileList files={r.ramdisk.files} now={now} /></td>
+                  <td><Ready ok={r.ramdisk.ready} /></td>
+                </tr>
+                {r.templates.map((t) => (
+                  <tr key={t.id}>
+                    <td><strong>{t.name} {t.version}</strong><div className="cell-sub mono">{t.slug}{!t.is_public && ' · internal'}</div></td>
+                    <td>{t.files.length ? <FileList files={t.files} now={now} /> : <span className="faint">the ramdisk only</span>}</td>
+                    <td><Ready ok={t.ready} /></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {anyMissing && (
+            <div className="card-body">
+              <Banner kind="warning">
+                <div>A reinstall refuses to start while a file it boots is missing. On the management server:</div>
+                <pre className="mono small" style={{ margin: '8px 0 0', whiteSpace: 'pre-wrap' }}>{'sudo -u doz /opt/doz/deploy/fetch-os-images.sh   # kernels, initrds, the Ubuntu ISO\nsudo /opt/doz/doz.sh ramdisk                     # the installer ramdisk'}</pre>
+              </Banner>
+            </div>
+          )}
+        </>
+      )}
+    </Card>
+  )
+}
+
+function Ready({ ok }: { ok: boolean }) {
+  return ok ? <span className="pill ok">ready</span> : <span className="pill critical">missing</span>
+}
+
+function FileList({ files, now }: { files: NetbootFile[]; now: number }) {
+  return (
+    <div className="stack" style={{ gap: 2 }}>
+      {files.map((f) => (
+        <div key={f.path} className="row small" style={{ gap: 8 }}>
+          <span className="faint" style={{ width: 44 }}>{f.role}</span>
+          <a className="mono" href={f.url} target="_blank" rel="noreferrer">{f.path}</a>
+          {f.present ? (
+            <span className="faint nowrap">{formatBytes(f.size_bytes ?? 0)} · {f.modified_at ? relativeTime(f.modified_at, now) : ''}</span>
+          ) : (
+            <span style={{ color: 'var(--crit)' }}>missing</span>
+          )}
+        </div>
+      ))}
+    </div>
   )
 }
 

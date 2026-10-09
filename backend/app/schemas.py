@@ -464,6 +464,40 @@ class OSTemplateOut(ORMModel):
     default_raid_level: RaidLevel
 
 
+class NetbootFileOut(BaseModel):
+    role: str
+    path: str
+    url: str
+    present: bool
+    size_bytes: int | None
+    modified_at: datetime | None
+
+
+class NetbootTemplateOut(BaseModel):
+    id: uuid.UUID
+    slug: str
+    name: str
+    version: str
+    install_method: InstallMethod
+    is_public: bool
+    files: list[NetbootFileOut]
+    ready: bool
+
+
+class NetbootRamdiskOut(BaseModel):
+    files: list[NetbootFileOut]
+    ready: bool
+
+
+class NetbootReportOut(BaseModel):
+    """What the PXE rails need on disk, and what is there."""
+
+    asset_dir: str
+    base_url: str
+    ramdisk: NetbootRamdiskOut
+    templates: list[NetbootTemplateOut]
+
+
 class OSTemplateCreate(BaseModel):
     slug: str = Field(min_length=1, max_length=64)
     name: str

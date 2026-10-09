@@ -420,6 +420,121 @@ def image_dir(tmp_path, monkeypatch):
     return tmp_path / "iso"
 
 
+class TestNetbootAssets:
+    """The Images page's view of what PXE reinstalls boot, and the job pre-check."""
+
+    @pytest.fixture
+    def asset_dir(self, tmp_path, monkeypatch):
+        from app.config import settings
+
+        monkeypatch.setattr(settings, "boot_asset_dir", str(tmp_path / "assets"))
+        return tmp_path / "assets"
+
+    @pytest.fixture
+    def ubuntu(self, db):
+        from app.enums import InstallMethod
+        from app.models import OSTemplate
+
+        template = OSTemplate(
+            slug="ubuntu-22.04", name="Ubuntu Server", family="debian", version="22.04 LTS",
+            install_method=InstallMethod.AUTOINSTALL,
+            kernel_path="/os/ubuntu-22.04/casper/vmlinuz",
+            initrd_path="/os/ubuntu-22.04/casper/initrd",
+            kernel_args="url={{ boot_asset_base_url }}/os/ubuntu-22.04/live.iso quiet",
+            config_template="ubuntu-2204-autoinstall.yaml.j2", sort_order=10,
+        )
+        db.add(template)
+        db.commit()
+        return template
+
+    def _write(self, root, rel: str, data: bytes = b"x" * 10) -> None:
+        path = root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+
+    def test_report_lists_every_file_a_template_boots_and_marks_what_is_missing(
+        self, client, admin_headers, asset_dir, ubuntu
+    ):
+        self._write(asset_dir, "os/ubuntu-22.04/casper/vmlinuz")
+        self._write(asset_dir, "os/ubuntu-22.04/casper/initrd")
+        report = client.get("/api/v1/admin/images/netboot", headers=admin_headers).json()
+        assert report["asset_dir"] == str(asset_dir)
+        assert report["ramdisk"]["ready"] is False
+        assert [f["path"] for f in report["ramdisk"]["files"]] == [
+            "doz-installer/vmlinuz", "doz-installer/initrd.img"
+        ]
+        (template,) = [t for t in report["templates"] if t["slug"] == "ubuntu-22.04"]
+        files = {f["path"]: f for f in template["files"]}
+        # kernel + initrd from their columns, the ISO from the kernel arguments
+        assert set(files) == {
+            "os/ubuntu-22.04/casper/vmlinuz", "os/ubuntu-22.04/casper/initrd",
+            "os/ubuntu-22.04/live.iso",
+        }
+        assert files["os/ubuntu-22.04/casper/vmlinuz"]["present"] is True
+        assert files["os/ubuntu-22.04/casper/vmlinuz"]["size_bytes"] == 10
+        assert files["os/ubuntu-22.04/casper/vmlinuz"]["url"].endswith(
+            "/os/ubuntu-22.04/casper/vmlinuz"
+        )
+        assert files["os/ubuntu-22.04/live.iso"]["present"] is False
+        assert files["os/ubuntu-22.04/live.iso"]["role"] == "iso"
+        assert template["ready"] is False
+
+        self._write(asset_dir, "os/ubuntu-22.04/live.iso")
+        self._write(asset_dir, "doz-installer/vmlinuz")
+        self._write(asset_dir, "doz-installer/initrd.img")
+        report = client.get("/api/v1/admin/images/netboot", headers=admin_headers).json()
+        assert report["ramdisk"]["ready"] is True
+        (template,) = [t for t in report["templates"] if t["slug"] == "ubuntu-22.04"]
+        assert template["ready"] is True
+
+    def test_an_empty_file_counts_as_missing(self, asset_dir):
+        from app.services import boot_assets
+
+        self._write(asset_dir, "doz-installer/vmlinuz", b"")
+        assert boot_assets.file_status("doz-installer/vmlinuz", "kernel")["present"] is False
+
+    def test_missing_for_names_what_a_boot_would_404_on(self, asset_dir, ubuntu):
+        from app.services import boot_assets
+
+        assert boot_assets.missing_for(None) == [
+            "doz-installer/vmlinuz", "doz-installer/initrd.img"
+        ]
+        self._write(asset_dir, "doz-installer/vmlinuz")
+        self._write(asset_dir, "doz-installer/initrd.img")
+        self._write(asset_dir, "os/ubuntu-22.04/casper/vmlinuz")
+        assert boot_assets.missing_for(None) == []
+        assert boot_assets.missing_for(ubuntu) == [
+            "os/ubuntu-22.04/casper/initrd", "os/ubuntu-22.04/live.iso"
+        ]
+
+    def test_netboot_refuses_before_touching_the_server(self, db, make_server, asset_dir, ubuntu):
+        from app.enums import ActorType, JobType
+        from app.services import jobs as job_service
+        from app.workers.tasks import _netboot_into_ramdisk
+
+        server = make_server()
+        job, _ = job_service.create_job(
+            db, job_type=JobType.INSTALL, server_id=server.id,
+            payload={"os_template_id": str(ubuntu.id)},
+            requested_by_type=ActorType.ADMIN,
+        )
+        db.commit()
+
+        class Driver:
+            calls: list[str] = []
+
+            def set_boot_once(self, target):  # noqa: ANN001
+                self.calls.append(f"boot {target}")
+
+            def power_cycle(self):
+                self.calls.append("cycle")
+
+        driver = Driver()
+        with pytest.raises(RuntimeError, match="doz-installer/vmlinuz.*fetch-os-images"):
+            _netboot_into_ramdisk(db, job, server, driver)
+        assert driver.calls == []
+
+
 class TestImageStore:
     def test_upload_streams_to_disk_and_catalogues(self, client, db, admin_headers, image_dir):
         payload = b"\x00ISO" * 100_000

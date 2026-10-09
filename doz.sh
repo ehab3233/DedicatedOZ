@@ -31,7 +31,7 @@
 #   ./doz.sh shell         python shell with the app importable
 #   ./doz.sh bench HOST    run the five hardware validation tests against a CIMC
 #   ./doz.sh assets        fetch OS installer images into installer/assets
-#   ./doz.sh ramdisk       build the installer ramdisk (needs docker)
+#   ./doz.sh ramdisk       build the installer ramdisk (installs docker and cpio if missing)
 
 set -euo pipefail
 
@@ -425,7 +425,26 @@ cmd_update() {
 }
 
 cmd_assets()  { exec "$ROOT/deploy/fetch-os-images.sh" "$@"; }
-cmd_ramdisk() { exec "$ROOT/installer/build-ramdisk.sh" --out "$ROOT/installer/assets/doz-installer" "$@"; }
+cmd_ramdisk() {
+    # docker assembles the Alpine rootfs, cpio packs it. Installed here rather
+    # than refused: this is the one command a fresh management server runs
+    # before its first reinstall.
+    local -a missing=()
+    command -v docker >/dev/null 2>&1 || missing+=(docker.io)
+    command -v cpio >/dev/null 2>&1 || missing+=(cpio)
+    if [ "${#missing[@]}" -gt 0 ]; then
+        [ "$(id -u)" -eq 0 ] || die "the ramdisk build needs ${missing[*]}: sudo apt install -y ${missing[*]}"
+        say "installing ${missing[*]}"
+        apt-get install -y -qq "${missing[@]}" >/dev/null \
+            || { apt-get update -qq; apt-get install -y -qq "${missing[@]}" >/dev/null; }
+        command -v docker >/dev/null 2>&1 && systemctl enable --now docker >/dev/null 2>&1 || true
+    fi
+    bash "$ROOT/installer/build-ramdisk.sh" --out "$ROOT/installer/assets/doz-installer" "$@"
+    # On an installed system the asset tree belongs to the service user.
+    if [ "$(id -u)" -eq 0 ] && id doz >/dev/null 2>&1 && [ -f /etc/doz/install.conf ]; then
+        chown -R doz:doz "$ROOT/installer/assets/doz-installer"
+    fi
+}
 
 # ---------------------------------------------------------------------------
 
