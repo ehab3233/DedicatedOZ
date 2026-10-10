@@ -25,6 +25,15 @@ def _login_ok(rsps):
     )
 
 
+
+def _kvm_enabled(rsps, state: str = "enabled") -> None:
+    """What `kvm_launch` reads first: the vKVM service object."""
+    rsps.add(rsps.POST, NUOVA, body=(
+        '<configResolveDn response="yes"><outConfig><commKvm dn="sys/svc-ext/kvm-svc" '
+        f'adminState="{state}" port="2068"/></outConfig></configResolveDn>'
+    ))
+
+
 def _logout_ok(rsps):
     rsps.add(rsps.POST, NUOVA, body='<aaaLogout cookie="" response="yes" outStatus="success"/>')
 
@@ -104,6 +113,7 @@ class TestCimcXmlApi:
     @responses.activate
     def test_kvm_launch_probes_for_the_html5_viewer(self):
         _login_ok(responses)
+        _kvm_enabled(responses)
         responses.add(
             responses.POST, NUOVA,
             body='<aaaGetComputeAuthTokens cookie="x" outTokens="1804289383,846930886" '
@@ -132,6 +142,7 @@ class TestCimcXmlApi:
                                   ({"Content-Security-Policy": "frame-ancestors *"}, True)):
             responses.reset()
             _login_ok(responses)
+            _kvm_enabled(responses)
             responses.add(responses.POST, NUOVA,
                           body='<aaaGetComputeAuthTokens outTokens="1,2" response="yes"/>')
             responses.add(responses.GET, f"https://{HOST}/html/kvmViewer.html", status=200,
@@ -146,6 +157,7 @@ class TestCimcXmlApi:
         # Some builds answer 200 with the login app for unknown paths; opening
         # that with tokens on the URL is what "KVM is not working" looks like.
         _login_ok(responses)
+        _kvm_enabled(responses)
         responses.add(responses.POST, NUOVA,
                       body='<aaaGetComputeAuthTokens outTokens="1,2" response="yes"/>')
         for path in ("/html/kvmViewer.html", "/html/kvm.html", "/kvmViewer.html"):
@@ -160,6 +172,7 @@ class TestCimcXmlApi:
     @responses.activate
     def test_no_viewer_found_still_offers_java_and_the_web_ui(self):
         _login_ok(responses)
+        _kvm_enabled(responses)
         responses.add(responses.POST, NUOVA,
                       body='<aaaGetComputeAuthTokens outTokens="1,2" response="yes"/>')
         for path in ("/html/kvmViewer.html", "/html/kvm.html", "/kvmViewer.html"):
@@ -682,22 +695,50 @@ class TestKvmTokensUnsupported:
     @responses.activate
     def test_old_firmware_without_the_token_method_is_not_an_error(self):
         _login_ok(responses)
+        _kvm_enabled(responses)
         responses.add(
             responses.POST, NUOVA,
             body='<aaaGetComputeAuthTokens cookie="x" response="yes" errorCode="2009" '
                  'invocationResult="unidentified-fail" errorDescr="Method not supported."/>',
         )
         _logout_ok(responses)
+        responses.add(responses.GET, f"https://{HOST}/html/kvmViewer.html", status=200,
+                      body="<html><title>KVM</title></html>")
         with CimcXmlApi(HOST, CRED) as api:
             links = api.kvm_launch()
         assert links["tokens_unsupported"] is True
         assert links["html5"] is None and links["java"] is None
         assert links["cimc"] == f"https://{HOST}/"
         assert "Method not supported" in links["reason"]
+        # The viewer is still there for a browser that has logged in to the CIMC.
+        assert links["viewer"] == f"https://{HOST}/html/kvmViewer.html"
+        assert links["kvm_service"]["adminState"] == "enabled"
+
+    @responses.activate
+    def test_a_vkvm_service_that_is_off_is_switched_on_before_asking(self):
+        # Cisco: tokens cannot be obtained while vKVM is disabled. Prepare BMC
+        # enables it, but a KVM click must not depend on that having run.
+        _login_ok(responses)
+        _kvm_enabled(responses, state="disabled")
+        responses.add(responses.POST, NUOVA, body=(
+            '<configConfMo response="yes"><outConfig><commKvm dn="sys/svc-ext/kvm-svc" '
+            'adminState="enabled" port="2068"/></outConfig></configConfMo>'
+        ))
+        responses.add(responses.POST, NUOVA,
+                      body='<aaaGetComputeAuthTokens outTokens="1,2" response="yes"/>')
+        responses.add(responses.GET, f"https://{HOST}/html/kvmViewer.html", status=200,
+                      body="<html><title>KVM</title></html>")
+        _logout_ok(responses)
+        with CimcXmlApi(HOST, CRED) as api:
+            links = api.kvm_launch()
+        assert links["html5"] and links["tokens_unsupported"] is False
+        body = responses.calls[2].request.body.decode()
+        assert 'commKvm dn="sys/svc-ext/kvm-svc" adminState="enabled" port="2068"' in body
 
     @responses.activate
     def test_other_token_failures_still_raise(self):
         _login_ok(responses)
+        _kvm_enabled(responses)
         responses.add(
             responses.POST, NUOVA,
             body='<aaaGetComputeAuthTokens cookie="x" response="yes" errorCode="552" '

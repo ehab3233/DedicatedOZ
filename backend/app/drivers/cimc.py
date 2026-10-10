@@ -462,19 +462,33 @@ class CimcXmlApi:
         network, so it is reported as `tokens_unsupported` with the CIMC web
         UI as the way in, rather than raised.
         """
+        # The CIMC refuses tokens while its vKVM service is off, so make sure
+        # of that first: a read, and a write only when it is off.
+        kvm_service: dict[str, str] = {}
+        try:
+            changed, kvm_service = self.enable_kvm()
+            if changed:
+                self._log("vKVM service was off; enabled it on port 2068")
+        except BMCError as exc:
+            self._log(f"could not read the vKVM service state: {exc}", level="warning")
         try:
             tkn1, tkn2 = self.compute_auth_tokens()
         except BMCError as exc:
             text = str(exc)
             if "not supported" in text.lower() or "error 2009" in text:
                 self._log(f"KVM tokens not available on this firmware: {text}", level="warning")
+                # The viewer itself is still there; with a CIMC login in the
+                # same browser it opens without tokens.
+                path, probe = self._probe_html5_viewer()
                 return {
                     "html5": None,
                     "java": None,
                     "cimc": f"{self.base_url}/",
+                    "viewer": f"{self.base_url}{path}" if path else None,
                     "tokens_unsupported": True,
                     "reason": text,
-                    "probe": [],
+                    "kvm_service": kvm_service,
+                    "probe": probe,
                     "embeddable": None,
                 }
             raise
@@ -484,6 +498,7 @@ class CimcXmlApi:
         query = urlencode({"cimcAddr": self.host, "cimcName": "KVM",
                            "tkn1": tkn1, "tkn2": tkn2})
         html5: str | None = None
+        viewer: str | None = None
         probe: list[dict] = []
         if settings.kvm_url_template:
             html5 = settings.kvm_url_template.format(
@@ -492,14 +507,15 @@ class CimcXmlApi:
         else:
             path, probe = self._probe_html5_viewer()
             if path:
-                html5 = f"{self.base_url}{path}?{query}"
+                viewer = f"{self.base_url}{path}"
+                html5 = f"{viewer}?{query}"
         java = f"{self.base_url}/kvm.jnlp?{query}"
         # Whether the panel may show the viewer inside its own page. Unknown
         # (None) when the path came from the template rather than a probe.
         embeddable = next((p.get("frameable") for p in probe if p.get("viewer")), None)
-        return {"html5": html5, "java": java, "cimc": f"{self.base_url}/",
-                "tokens_unsupported": False, "reason": None, "probe": probe,
-                "embeddable": embeddable}
+        return {"html5": html5, "java": java, "cimc": f"{self.base_url}/", "viewer": viewer,
+                "tokens_unsupported": False, "reason": None, "kvm_service": kvm_service,
+                "probe": probe, "embeddable": embeddable}
 
     def _probe_html5_viewer(self) -> tuple[str | None, list[dict]]:
         """Which of the known viewer paths this CIMC serves, with what each

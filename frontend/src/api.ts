@@ -445,6 +445,10 @@ export const api = {
       probe?: Array<{ path: string; status: number | null; viewer?: boolean; error?: string; location?: string | null }>
       /** Whether the CIMC lets the viewer be shown inside the panel; null when unknown. */
       embeddable?: boolean | null
+      /** The viewer page itself, without tokens: opens for a browser logged in to the CIMC. */
+      viewer?: string | null
+      /** The vKVM service object as the CIMC reported it (adminState, port). */
+      kvm_service?: Record<string, string>
     }>(
       `/api/v1/admin/servers/${id}/kvm`,
       { method: 'POST' },

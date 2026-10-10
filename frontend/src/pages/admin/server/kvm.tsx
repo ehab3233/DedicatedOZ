@@ -129,13 +129,27 @@ export function KvmViewer({ serverId, cimcIp, port, autoConnect = false }: {
         <span className="spacer" />
         <button className="sm primary" onClick={open} disabled={busy}>{busy ? <Spinner /> : <RefreshCw />}{framed ? 'Reconnect' : 'Connect'}</button>
         <button className="sm" onClick={() => frame.current?.requestFullscreen?.()} disabled={!framed} title="The viewer alone, full screen (Esc to leave)"><Maximize2 />Full screen</button>
-        <button className="sm" onClick={launch} disabled={busy} title="The viewer in a tab of its own, with fresh tokens"><ExternalLink />Open in a tab</button>
+        {result?.tokens_unsupported && result.viewer ? (
+          <a className="button sm" href={result.viewer} target="_blank" rel="noreferrer" title="The CIMC's viewer page; works once you are logged in to the CIMC in this browser"><ExternalLink />Open the viewer</a>
+        ) : (
+          <button className="sm" onClick={launch} disabled={busy} title="The viewer in a tab of its own, with fresh tokens"><ExternalLink />Open in a tab</button>
+        )}
         {java && <a className="button sm" href={java}>Java KVM (.jnlp)</a>}
       </div>
 
       {error && <Banner kind="error">{error}</Banner>}
       {result?.tokens_unsupported && (
-        <Banner kind="info">CIMC {result.firmware ?? ''} does not issue KVM launch tokens. <a href={result.cimc} target="_blank" rel="noreferrer">Open the CIMC</a>, log in and use its own Launch KVM.</Banner>
+        <Banner kind="warning">
+          <div>
+            CIMC {result.firmware ?? ''} refused to issue KVM launch tokens: <span className="mono">{result.reason}</span>
+            {result.kvm_service?.adminState && <> (vKVM service {result.kvm_service.adminState}, port {result.kvm_service.port ?? '?'})</>}.
+          </div>
+          <div style={{ marginTop: 6 }}>
+            Without tokens the viewer cannot be opened from here, but it opens for a browser that is logged in to the CIMC:
+            {' '}<a href={result.cimc} target="_blank" rel="noreferrer">log in to the CIMC</a> once in this browser, then
+            {' '}{result.viewer ? <a href={result.viewer} target="_blank" rel="noreferrer">open the viewer</a> : 'use its own Launch KVM'}.
+          </div>
+        </Banner>
       )}
       {result && !result.tokens_unsupported && !result.html5 && (
         <Banner kind="warning">{noViewerMessage(result)}</Banner>
@@ -148,7 +162,9 @@ export function KvmViewer({ serverId, cimcIp, port, autoConnect = false }: {
         <iframe ref={frame} src={url ?? undefined} title="KVM" className="kvm-frame" allow="fullscreen; clipboard-read; clipboard-write" />
       ) : (
         <div className="kvm-frame kvm-placeholder">
-          {busy ? <><Spinner /> Getting tokens from the CIMC…</> : <><MonitorPlay /> Press Connect to open the graphical console here.</>}
+          {busy ? <><Spinner /> Getting tokens from the CIMC…</>
+            : result?.tokens_unsupported ? <><MonitorPlay /> This CIMC issues no launch tokens; see above for the way in.</>
+            : <><MonitorPlay /> Press Connect to open the graphical console here.</>}
         </div>
       )}
       <p className="faint small" style={{ margin: 0 }}>
