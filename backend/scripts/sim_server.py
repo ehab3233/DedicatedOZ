@@ -73,6 +73,9 @@ def main() -> int:
             db.add(server)
         server.model = "Simulated C220 M4"
         server.hostname = server.hostname or "sim01"
+        # Its BMC is the simulator on the management server itself: show its
+        # readings, never provision or power it from the panel.
+        server.role = "management"
         server.bmc_protocol = "ipmi"
         server.ipmi_port = args.port
         server.rack = server.rack or "SIM"

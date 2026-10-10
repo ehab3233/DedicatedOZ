@@ -315,9 +315,19 @@ DOZ_INSTALLER_TEMPLATE_DIR=${INSTALL_DIR}/installer/templates
 DOZ_BOOT_ASSET_DIR=${INSTALL_DIR}/installer/assets
 # ISO image store, served to BMCs at http://${MGMT_IP}:8080/iso/
 DOZ_IMAGE_DIR=${INSTALL_DIR}/installer/assets/iso
+# Router automation (optional). With a RouterOS 7 REST URL and a user that has
+# the read, write, api and rest-api policies, assigning a server's primary
+# address and every install put its switch port into the block's VLAN and
+# add a PXE lease for its MAC. Empty: the Network tab shows the commands.
+#DOZ_ROUTEROS_URL=https://10.20.0.1/rest
+#DOZ_ROUTEROS_USERNAME=doz
+#DOZ_ROUTEROS_PASSWORD=
+#DOZ_ROUTEROS_BRIDGE=bridge
 # Prepare BMC: persistent boot order it sets (disk,pxe | pxe,disk | empty = leave)
 # and NTP servers it points each CIMC at (comma-separated; empty = leave).
 DOZ_BMC_PREPARE_BOOT_ORDER=disk,pxe
+# and the BIOS power profile: balanced | low_power | performance | empty = leave.
+DOZ_BMC_PREPARE_POWER_PROFILE=balanced
 DOZ_NTP_SERVERS=
 DOZ_IPMITOOL_PATH=/usr/bin/ipmitool
 DOZ_SOL_IDLE_TIMEOUT_SECONDS=1800

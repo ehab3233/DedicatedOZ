@@ -27,6 +27,9 @@ from app.models import Job, JobLogEntry, Server
 from app.security import generate_callback_token
 from app.services.lifecycle import IllegalTransition, transition_server
 
+#: What the panel may do to its own management server: read it.
+READ_ONLY_JOB_TYPES = {JobType.HEALTH_POLL, JobType.INVENTORY_SYNC, JobType.BANDWIDTH_POLL}
+
 #: Job types that must not overlap on one server. Power reads are exempt.
 EXCLUSIVE_JOB_TYPES = {
     JobType.INSTALL,
@@ -86,6 +89,15 @@ def create_job(
     case: an operator resetting a machine that is stuck mid-install, where
     waiting for the install job to time out is the wrong answer.
     """
+    if server_id and job_type not in READ_ONLY_JOB_TYPES:
+        from app.models import Server
+
+        target = db.get(Server, server_id)
+        if target is not None and target.role == "management":
+            raise JobConflict(
+                f"{target.serial} is the management server: the panel reads it "
+                "(health, readings, events) but does not change it"
+            )
     if server_id and job_type in EXCLUSIVE_JOB_TYPES and not allow_concurrent:
         existing = active_job_for_server(db, server_id)
         if existing:

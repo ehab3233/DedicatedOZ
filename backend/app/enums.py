@@ -80,6 +80,8 @@ class JobType(enum.StrEnum):
     IMAGE_FETCH = "image_fetch"
     #: Build (or clear) a RAID virtual drive through the BMC.
     RAID_CONFIGURE = "raid_configure"
+    #: Program the router: switch port into the customer VLAN, PXE lease.
+    NETWORK_APPLY = "network_apply"
     INSTALL = "install"
     RESCUE = "rescue"
     WIPE = "wipe"

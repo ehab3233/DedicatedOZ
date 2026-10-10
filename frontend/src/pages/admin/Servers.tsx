@@ -112,7 +112,7 @@ export default function Servers() {
                       </td>
                       <td>
                         <Link to={`/admin/servers/${server.id}`} className="mono strong" onClick={(e) => e.stopPropagation()}>{server.serial}</Link>
-                        <div className="cell-sub">{server.hostname ?? server.model}</div>
+                        <div className="cell-sub">{server.hostname ?? server.model}{server.role === 'management' && <span className="pill info" style={{ marginLeft: 6 }}>management</span>}</div>
                       </td>
                       <td>
                         <span className="status-line" title={p?.error ?? (p ? `via ${p.via}` : 'reading…')}>

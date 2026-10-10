@@ -39,7 +39,8 @@ export default function Overview() {
   const [modal, setModal] = useState<null | 'assign' | 'reinstall' | 'wipe' | 'image'>(null)
   const [bootDevice, setBootDevice] = useState<BootDevice>('pxe')
   const [bootThen, setBootThen] = useState<BootFollowUp>('reset')
-  const locked = Boolean(activeJob)
+  const readOnly = s.role === 'management'
+  const locked = Boolean(activeJob) || readOnly
 
   const sensors = useLiveSensors(s.id, 10000)
   const readings = sensors.report?.sensors ?? []
@@ -115,7 +116,7 @@ export default function Overview() {
 
           <UtilisationCard report={sensors.report} />
 
-          <Card title="Provisioning" note="Reinstall and wipe destroy data. Rescue and boot-device changes do not.">
+          {!readOnly && <Card title="Provisioning" note="Reinstall and wipe destroy data. Rescue and boot-device changes do not.">
             <div className="stack" style={{ gap: 14 }}>
               <div className="spread">
                 <div>
@@ -149,7 +150,7 @@ export default function Overview() {
                 </div>
               </div>
             </div>
-          </Card>
+          </Card>}
 
           <Card title="Lifecycle">
             <div className="spread">

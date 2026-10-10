@@ -50,6 +50,17 @@ KVM_DN = "sys/svc-ext/kvm-svc"
 REDFISH_DN = "sys/svc-ext/redfish-svc"
 NTP_DN = "sys/svc-ext/ntp-svc"
 CONSOLE_REDIRECTION_DN = f"{RACK_UNIT}/bios/bios-settings/Console-redirection"
+CPU_POWER_MANAGEMENT_DN = f"{RACK_UNIT}/bios/bios-settings/CPU-PowerManagement"
+CPU_ENERGY_PERFORMANCE_DN = f"{RACK_UNIT}/bios/bios-settings/CPU-EnergyPerformance"
+
+#: BIOS power profiles Prepare BMC can set: (Power Technology, Energy
+#: Performance). The M4 ships at Performance / Balanced Performance; the
+#: platform's default lets the CPUs idle down between customers' bursts.
+POWER_PROFILES: dict[str, tuple[str, str]] = {
+    "balanced": ("Energy Efficient", "Balanced Energy"),
+    "low_power": ("Energy Efficient", "Energy Efficient"),
+    "performance": ("Performance", "Performance"),
+}
 LOM_OPTION_ROM_DN = f"{RACK_UNIT}/bios/bios-settings/LOMPort-OptionROM"
 BOOT_PRECISION_DN = f"{RACK_UNIT}/boot-precision"
 
@@ -352,6 +363,25 @@ class CimcXmlApi:
             vpFlowControl="none",
             vpTerminalType="vt100-plus",
         )
+
+    def set_power_profile(self, profile: str) -> tuple[bool, dict[str, str]]:
+        """The BIOS's CPU power technology and energy/performance bias.
+        Applies at the next host boot. See POWER_PROFILES."""
+        try:
+            power_technology, bias = POWER_PROFILES[profile]
+        except KeyError:
+            raise ValueError(
+                f"power profile must be one of {', '.join(POWER_PROFILES)}, not {profile!r}"
+            ) from None
+        changed_power, power = self.ensure(
+            CPU_POWER_MANAGEMENT_DN, "biosVfCPUPowerManagement",
+            vpCPUPowerManagement=power_technology,
+        )
+        changed_bias, energy = self.ensure(
+            CPU_ENERGY_PERFORMANCE_DN, "biosVfCPUEnergyPerformance",
+            vpCPUEnergyPerformance=bias,
+        )
+        return changed_power or changed_bias, {**power, **energy}
 
     def enable_vmedia(self) -> tuple[bool, dict[str, str]]:
         """Virtual media service on: what ISO installs mount through."""

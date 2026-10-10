@@ -212,6 +212,8 @@ export interface BandwidthSeries {
 }
 
 export interface AdminServer extends ServerDetail {
+  /** 'customer', or 'management': the platform's own machine, read but never changed from here. */
+  role: 'customer' | 'management'
   cimc_ip: string
   cimc_credential_ref: string
   bmc_protocol: string | null
@@ -393,6 +395,7 @@ export const api = {
     rack_unit?: number | null
     switch_name?: string | null
     switch_port?: string | null
+    role?: 'customer' | 'management'
     customer_vlan?: number | null
     provisioning_mac?: string | null
     notes?: string | null
@@ -453,6 +456,10 @@ export const api = {
       `/api/v1/admin/servers/${id}/kvm`,
       { method: 'POST' },
     ),
+  networkPlan: (id: string) =>
+    request<NetworkPlanReport>(`/api/v1/admin/servers/${id}/network`),
+  applyNetwork: (id: string) =>
+    request<Job>(`/api/v1/admin/servers/${id}/network/apply`, { method: 'POST' }),
   bmcSettings: (id: string) =>
     request<{
       protocol: string
@@ -683,6 +690,32 @@ export interface Utilization {
   cpu: number | null
   memory: number | null
   io: number | null
+}
+
+export interface NetworkPlan {
+  serial: string
+  vlan: number
+  port: string
+  mac: string
+  address: string
+  prefix_len: number
+  gateway: string
+  network: string
+  next_server: string
+  boot_file: string
+  dns_server: string
+  vlan_interface: string
+  dhcp_server: string
+}
+
+export interface NetworkPlanReport {
+  /** Whether the panel has a router to program (DOZ_ROUTEROS_URL). */
+  configured: boolean
+  router: string | null
+  plan: NetworkPlan | null
+  reason: string | null
+  /** RouterOS commands for the same configuration, by hand. */
+  script: string | null
 }
 
 export interface SensorReport {

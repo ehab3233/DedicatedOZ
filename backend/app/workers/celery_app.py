@@ -52,6 +52,10 @@ celery_app.conf.update(
             "schedule": crontab(minute="*/5"),
         },
         # Catches jobs the API committed but could not hand to the broker.
+        "sensors-all": {
+            "task": "doz.poll.sensors_all",
+            "schedule": settings.sensors_poll_interval_seconds,
+        },
         "redispatch-queued": {
             "task": "doz.poll.redispatch_queued",
             "schedule": crontab(minute="*/2"),

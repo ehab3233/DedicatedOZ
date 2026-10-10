@@ -22,6 +22,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import INET, JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -129,6 +130,12 @@ class Server(Base, TimestampMixin):
     #: Opaque key into the secrets backend, e.g. "cimc/SN12345".
     cimc_credential_ref: Mapped[str] = mapped_column(String(255), nullable=False)
     cimc_firmware: Mapped[str | None] = mapped_column(String(64))
+    #: "customer": a server the panel provisions and hands out. "management":
+    #: the platform's own machine, read (health, readings, events) but never
+    #: changed from here.
+    role: Mapped[str] = mapped_column(
+        String(16), default="customer", server_default=text("'customer'"), nullable=False
+    )
     bios_version: Mapped[str | None] = mapped_column(String(64))
     #: Redfish system path, discovered once and cached.
     redfish_system_path: Mapped[str | None] = mapped_column(String(255))

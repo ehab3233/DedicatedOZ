@@ -335,6 +335,40 @@ class TestRaidOverXmlApi:
                 'size="1830000 MB" adminState="trigger" />') in body
 
     @responses.activate
+    def test_prepare_sets_the_bios_power_profile(self):
+        # Balanced: CPUs idle down between bursts. Read first, written only
+        # where the BIOS differs; both tokens apply at the next boot.
+        _login_ok(responses)
+        responses.add(responses.POST, NUOVA, body=(
+            '<configResolveDn response="yes"><outConfig><biosVfCPUPowerManagement '
+            'dn="sys/rack-unit-1/bios/bios-settings/CPU-PowerManagement" '
+            'vpCPUPowerManagement="Performance"/></outConfig></configResolveDn>'
+        ))
+        responses.add(responses.POST, NUOVA, body=(
+            '<configConfMo response="yes"><outConfig><biosVfCPUPowerManagement '
+            'dn="sys/rack-unit-1/bios/bios-settings/CPU-PowerManagement" '
+            'vpCPUPowerManagement="Energy Efficient"/></outConfig></configConfMo>'
+        ))
+        responses.add(responses.POST, NUOVA, body=(
+            '<configResolveDn response="yes"><outConfig><biosVfCPUEnergyPerformance '
+            'dn="sys/rack-unit-1/bios/bios-settings/CPU-EnergyPerformance" '
+            'vpCPUEnergyPerformance="Balanced Energy"/></outConfig></configResolveDn>'
+        ))
+        _logout_ok(responses)
+        with CimcXmlApi(HOST, CRED) as api:
+            changed, attrs = api.set_power_profile("balanced")
+            with pytest.raises(ValueError, match="balanced, low_power, performance"):
+                api.set_power_profile("turbo")
+        assert changed and attrs["vpCPUPowerManagement"] == "Energy Efficient"
+        assert attrs["vpCPUEnergyPerformance"] == "Balanced Energy"
+        bodies = [c.request.body.decode() for c in responses.calls]
+        assert any('biosVfCPUPowerManagement dn="sys/rack-unit-1/bios/bios-settings/'
+                   'CPU-PowerManagement" vpCPUPowerManagement="Energy Efficient"' in b
+                   for b in bodies)
+        # The bias already matched, so only one write went out.
+        assert sum("configConfMo" in b for b in bodies) == 1
+
+    @responses.activate
     def test_prepare_resets_a_custom_ipmi_encryption_key(self):
         # A custom key makes every IPMI session fail with the wrong-password
         # message; the platform never sends a key, so Prepare zeroes it.
@@ -689,6 +723,33 @@ class TestServerUtilization:
             assert api.server_utilization() == {"overall": None, "cpu": None,
                                                 "memory": None, "io": None}
             assert api.server_utilization() is None
+
+
+class TestVirtualDrivesFromXml:
+    """The M4's Redfish calls a RAID 1 NonRedundant and doubles its size."""
+
+    @responses.activate
+    def test_the_xml_view_replaces_redfish_level_and_size(self, make_server):
+        from app.workers.tasks import _volumes_from_xml
+
+        server = make_server(cimc_ip=HOST, cimc_credential_ref="cimc/x")
+        import app.workers.tasks as tasks
+        tasks.credential_for = lambda s: CRED  # noqa: E731 - test seam
+        _login_ok(responses)
+        responses.add(responses.POST, NUOVA, body=(
+            '<configResolveClass response="yes" classId="storageVirtualDrive"><outConfigs>'
+            '<storageVirtualDrive dn="sys/rack-unit-1/board/storage-SAS-SLOT-HBA/vd-0" '
+            'id="0" name="doz" raidLevel="RAID 1" size="952720 MB" vdStatus="Optimal" '
+            'bootDrive="true"/></outConfigs></configResolveClass>'
+        ))
+        _logout_ok(responses)
+        volumes = _volumes_from_xml(server, [{"name": "doz", "raid_type": "NonRedundant",
+                                             "capacity_gb": 1998, "health": "OK",
+                                             "controller": "SLOT-HBA"}], lambda *a, **k: None)
+        assert volumes == [{
+            "name": "doz", "raid_type": "RAID1", "capacity_gb": 999, "health": "OK",
+            "controller": "SLOT-HBA", "state": "Optimal", "boot_drive": True,
+        }]
 
 
 class TestKvmTokensUnsupported:

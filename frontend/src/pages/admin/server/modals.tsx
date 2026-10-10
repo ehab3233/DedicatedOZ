@@ -211,6 +211,7 @@ export function EditModal({ server, onClose, onDone }: { server: AdminServer; on
     switch_name: server.switch_name ?? '',
     switch_port: server.switch_port ?? '',
     customer_vlan: server.customer_vlan?.toString() ?? '',
+    role: server.role ?? 'customer',
     provisioning_mac: server.provisioning_mac ?? '',
     cimc_credential_ref: server.cimc_credential_ref,
     cimc_ip: server.cimc_ip,
@@ -232,7 +233,7 @@ export function EditModal({ server, onClose, onDone }: { server: AdminServer; on
         await api.updateServer(server.id, {
           hostname: form.hostname || null, datacenter: form.datacenter || null, rack: form.rack || null,
           rack_unit: form.rack_unit ? Number(form.rack_unit) : null, switch_name: form.switch_name || null,
-          switch_port: form.switch_port || null, customer_vlan: form.customer_vlan ? Number(form.customer_vlan) : null,
+          switch_port: form.switch_port || null, customer_vlan: form.customer_vlan ? Number(form.customer_vlan) : null, role: form.role,
           provisioning_mac: form.provisioning_mac || null, cimc_credential_ref: form.cimc_credential_ref, cimc_ip: form.cimc_ip,
           bmc_protocol: form.bmc_protocol || null, ipmi_cipher_suite: form.ipmi_cipher_suite || null, ipmi_port: form.ipmi_port ? Number(form.ipmi_port) : null,
           redfish_port: form.redfish_port ? Number(form.redfish_port) : null, notes: form.notes || null,
@@ -271,6 +272,12 @@ export function EditModal({ server, onClose, onDone }: { server: AdminServer; on
         <div className="field"><label>PXE MAC</label><input className="mono" value={form.provisioning_mac} onChange={set('provisioning_mac')} /></div>
         <div className="field"><label>Switch</label><input value={form.switch_name} onChange={set('switch_name')} /></div>
         <div className="field"><label>Switch port</label><input value={form.switch_port} onChange={set('switch_port')} /></div>
+        <div className="field"><label>Role</label>
+          <select value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value as 'customer' | 'management' })}>
+            <option value="customer">Customer server: provisioned and handed out</option>
+            <option value="management">Management server: read only, never changed from the panel</option>
+          </select>
+        </div>
         <div className="field"><label>Customer VLAN</label><input type="number" min={1} max={4094} value={form.customer_vlan} onChange={set('customer_vlan')} /></div>
       </div>
       <div className="field"><label>Notes</label><textarea value={form.notes} onChange={set('notes')} /></div>

@@ -692,3 +692,15 @@ class TestSensors:
         with pytest.raises(BMCError, match="list no sensors"):
             driver().sensors()
         assert driver().power_reading() is None
+
+
+class TestEmptyBays:
+    def test_an_empty_bay_is_not_a_drive(self):
+        from app.drivers.redfish import _empty_slot
+
+        assert _empty_slot({"name": "SLOT-1", "model": "NA", "serial": "NA",
+                            "capacity_bytes": None, "state": "Disabled",
+                            "failure_predicted": True})
+        assert _empty_slot({"name": "SLOT-2", "state": "Absent"})
+        assert not _empty_slot({"name": "PD-1", "model": "ST91000640SS", "serial": "9XG2GFAM",
+                                "capacity_bytes": 1_000_204_886_016, "state": "Enabled"})

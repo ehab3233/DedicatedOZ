@@ -63,6 +63,18 @@ BOOT_TARGETS: dict[str, str] = {
 _REDACTED = "***"
 
 
+def _empty_slot(drive: dict) -> bool:
+    """A bay with nothing in it, as the M4's Redfish describes one."""
+    if str(drive.get("state") or "").lower() == "absent":
+        return True
+    blank = {"", "na", "n/a", "none", "unknown"}
+    return (
+        str(drive.get("model") or "").strip().lower() in blank
+        and str(drive.get("serial") or "").strip().lower() in blank
+        and not drive.get("capacity_bytes")
+    )
+
+
 def _redfish_message(body: Any) -> str:
     """The readable reason in a Redfish error body, if there is one.
 
@@ -611,6 +623,10 @@ class RedfishDriver(BMCDriver):
             return drives, volumes
         for controller in controllers:
             for drive in controller["drives"]:
+                if _empty_slot(drive):
+                    # The M4 lists every bay; an empty one comes back as model
+                    # "NA", state Disabled and, absurdly, failure predicted.
+                    continue
                 capacity = drive.get("capacity_bytes")
                 drives.append({
                     "name": drive["name"],

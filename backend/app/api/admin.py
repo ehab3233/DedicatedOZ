@@ -47,6 +47,7 @@ from app.schemas import (
 from app.secrets import SecretNotFoundError, get_secrets_backend
 from app.security import normalise_mac
 from app.services import jobs as job_service
+from app.services import network as network_service
 from app.services import provisioning
 from app.services.audit import record_audit
 from app.services.dispatch import enqueue
@@ -683,6 +684,20 @@ def assign_ip(
     db.commit()
     db.refresh(assignment)
 
+    # With a router to program, a primary address is pushed to it at once:
+    # the switch port into the block's VLAN and a PXE lease for the MAC.
+    if is_primary and network_service.configured():
+        try:
+            network_service.plan_for(db, server)
+            job, _ = job_service.create_job(
+                db, job_type=JobType.NETWORK_APPLY, server_id=server.id, payload={},
+                requested_by_id=admin.id, requested_by_type=ActorType.ADMIN,
+            )
+            db.commit()
+            enqueue(db, job)
+        except (network_service.PlanError, job_service.JobConflict):
+            pass  # nothing to program yet, or one is already queued
+
     out = IPAssignmentOut.model_validate(assignment)
     out.gateway = str(block.gateway) if block.gateway else None
     return out
@@ -704,6 +719,17 @@ def release_ip(
         raise HTTPException(status_code=404, detail="assignment not found")
     assignment.released_at = datetime.now(UTC)
     db.add(assignment)
+    detail: dict = {"address": str(assignment.address)}
+    # The router's lease goes with it, so the address cannot be handed to the
+    # old server again by a stale lease.
+    server = db.get(Server, assignment.server_id) if assignment.server_id else None
+    if (assignment.is_primary and network_service.configured() and server
+            and server.provisioning_mac):
+        try:
+            detail["lease_removed"] = network_service.remove_lease(server.provisioning_mac)
+        except network_service.NetworkError as exc:
+            detail["lease_removed"] = False
+            detail["router_error"] = str(exc)
     record_audit(
         db,
         action="ip.released",
@@ -712,7 +738,7 @@ def release_ip(
         actor_label=admin.email,
         target_type="ip_assignment",
         target_id=str(assignment_id),
-        detail={"address": str(assignment.address)},
+        detail=detail,
     )
     db.commit()
 

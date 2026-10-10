@@ -20,7 +20,7 @@ from app.deps import client_ip, current_admin
 from app.drivers import BMCError, get_driver
 from app.drivers.cimc import CimcXmlApi
 from app.drivers.factory import cipher_for, credential_for, protocol_for
-from app.drivers.ipmi import IpmiDriver, estimate_power, ipmitool_path
+from app.drivers.ipmi import IpmiDriver, ipmitool_path
 from app.drivers.redfish import RedfishDriver
 from app.enums import ActorType, JobType, ServerState
 from app.models import Customer, Image, Job, Server
@@ -34,8 +34,9 @@ from app.schemas import (
     VmediaBootRequest,
 )
 from app.secrets import BMCCredential, SecretNotFoundError, get_secrets_backend
-from app.services import bmc_status, bmc_test, images
+from app.services import bmc_status, bmc_test, images, network
 from app.services import jobs as job_service
+from app.services import sensors as sensors_service
 from app.services.audit import record_audit
 from app.services.dispatch import enqueue
 
@@ -87,19 +88,6 @@ def _redfish(server: Server, *, timeout: int | None = None) -> RedfishDriver:
         system_path=server.redfish_system_path,
         timeout=timeout or settings.bmc_status_timeout_seconds, retries=1,
     )
-
-
-def _utilization(server: Server) -> tuple[dict | None, str | None]:
-    """The CIMC's own CPU, memory and IO figures, and why not if not."""
-    try:
-        with CimcXmlApi(str(server.cimc_ip), credential_for(server), port=server.redfish_port,
-                        timeout=10) as api:
-            figures = api.server_utilization()
-    except (BMCError, SecretNotFoundError, ValueError) as exc:
-        return None, str(exc)
-    if figures is None:
-        return None, "this CIMC does not report serverUtilization"
-    return figures, None
 
 
 def _bmc_call(fn):  # noqa: ANN001
@@ -366,47 +354,25 @@ def fleet_power(fresh: bool = Query(default=False), db: Session = Depends(get_db
 def sensors(
     server_id: uuid.UUID, fresh: bool = Query(default=False), db: Session = Depends(get_db)
 ) -> dict:
-    """Every sensor the BMC has, with its reading now: temperatures, fans,
-    voltages, power supplies, the power draw (DCMI, else the PSU output
-    sensors) and the CIMC's own utilisation figures.
+    """Every sensor the BMC has: temperatures, fans, voltages, power supplies,
+    the power draw (DCMI, else the PSU output sensors) and the CIMC's own
+    utilisation figures.
 
-    IPMI first; when it is off or its key is wrong, the Redfish Thermal and
-    Power resources carry most of the same readings.
+    The worker reads these on a timer and keeps the report; this serves the
+    kept report at once, and reads the BMC itself only for `fresh=1` or when
+    nothing is kept yet. IPMI first; when it is off or its key is wrong, the
+    Redfish Thermal and Power resources carry most of the same readings.
     """
     server = _server(db, server_id)
+    if not fresh:
+        kept = sensors_service.load(server.id)
+        if kept is not None:
+            return kept
     driver = _ipmi(server, timeout=45)
 
     def read() -> dict:
-        try:
-            readings = driver.sensors()
-            report = {
-                "sensors": readings,
-                "power": driver.power_reading() or estimate_power(readings),
-                "via": "ipmi",
-                "fallback_reason": None,
-            }
-        except BMCError as ipmi_error:
-            redfish = _redfish(server)
-            try:
-                readings = redfish.sensors()
-                report = {
-                    "sensors": readings,
-                    "power": redfish.power_reading() or estimate_power(readings),
-                    "via": "redfish",
-                    "fallback_reason": str(ipmi_error),
-                }
-            except BMCError as redfish_error:
-                raise BMCError(
-                    f"IPMI: {ipmi_error}. Redfish: {redfish_error}"
-                ) from redfish_error
-            finally:
-                redfish.close()
-        utilization, why_not = _utilization(server)
-        report.update({
-            "utilization": utilization,
-            "utilization_error": why_not,
-            "checked_at": _now(),
-        })
+        report = sensors_service.collect(server, driver, lambda: _redfish(server))
+        sensors_service.store(server.id, report)
         return report
 
     return _bmc_call(lambda: bmc_status.cached("sensors", server.id, read, fresh=fresh))
@@ -670,6 +636,45 @@ def configure_raid(
         db, request, admin, server, JobType.RAID_CONFIGURE,
         payload={"level": payload.level.value}, audit_action="server.raid_configure",
     )
+
+
+@router.get("/servers/{server_id}/network")
+def network_plan(server_id: uuid.UUID, db: Session = Depends(get_db)) -> dict:
+    """What the panel would program on the router for this server (switch
+    port into the block's VLAN, PXE lease for its MAC), and the RouterOS
+    commands for doing the same by hand."""
+    server = _server(db, server_id)
+    base = {"configured": network.configured(), "router": settings.routeros_url or None}
+    try:
+        plan = network.plan_for(db, server)
+    except network.PlanError as exc:
+        return {**base, "plan": None, "reason": str(exc), "script": None}
+    return {**base, "plan": plan.as_dict(), "reason": None,
+            "script": network.routeros_script(plan)}
+
+
+@router.post("/servers/{server_id}/network/apply", response_model=JobOut,
+             status_code=status.HTTP_202_ACCEPTED)
+def apply_network(
+    server_id: uuid.UUID,
+    request: Request,
+    db: Session = Depends(get_db),
+    admin: Customer = Depends(current_admin),
+) -> Job:
+    """Program the router for this server now (also done at every install)."""
+    server = _server(db, server_id)
+    if not network.configured():
+        raise HTTPException(
+            status_code=400,
+            detail="no router configured: set DOZ_ROUTEROS_URL, DOZ_ROUTEROS_USERNAME and "
+                   "DOZ_ROUTEROS_PASSWORD in /etc/doz/doz.env on the management server",
+        )
+    try:
+        network.plan_for(db, server)
+    except network.PlanError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _queue(db, request, admin, server, JobType.NETWORK_APPLY, payload={},
+                  audit_action="server.network_apply")
 
 
 @router.get("/servers/{server_id}/vmedia")

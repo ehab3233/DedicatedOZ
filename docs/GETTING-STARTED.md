@@ -285,8 +285,12 @@ On save, a **Prepare BMC** job runs (a tickbox on the form; leave it on).
 Over the CIMC's XML API it switches on IPMI over LAN, Serial-over-LAN at
 115200 on COM0, BIOS console redirection to the same port, virtual media,
 KVM and Redfish, enables the PXE option ROMs on the LAN ports, sets the boot
-order (disk first, PXE available, legacy mode) and, if `DOZ_NTP_SERVERS` is
-set, NTP. BIOS changes take effect at the next boot. It then proves IPMI
+order (disk first, PXE available, legacy mode), sets the BIOS power profile
+(`DOZ_BMC_PREPARE_POWER_PROFILE`, default `balanced`: CPU power technology
+Energy Efficient with the energy/performance bias at Balanced Energy, so the
+CPUs idle down between bursts; `performance` or `low_power` are the other
+choices, empty leaves the BIOS alone) and, if `DOZ_NTP_SERVERS` is set, NTP.
+BIOS changes take effect at the next boot. It then proves IPMI
 works by reading the power state, reads back the SOL settings, and queues
 the **inventory sync**. The job log shows each step and the CIMC's reply;
 anything this firmware rejects is listed at the end, and those few you set
@@ -369,10 +373,12 @@ launcher (`kvm.jnlp`) needs a Java Web Start such as OpenWebStart.
 
 **Sensors.** The **Sensors** tab reads every sensor the BMC has over IPMI:
 temperatures, fans, voltages, PSU output and, where the BMC supports DCMI,
-the power draw. It re-reads every ten seconds while the tab is open, and
-the **Overview** tab shows the hottest sensor, inlet temperature, the fan
-speed range and power draw at the same rate. Nothing here is stored or
-estimated: it is what the BMC answered, with the time it answered. When IPMI is not answering (off, or an IPMI encryption key the panel does not have) the same readings come from Redfish's Thermal and Power resources and the page says so. The power figure is DCMI where the BMC has it, otherwise the PSU output sensors; input and output are never added together. The overview's **Utilisation** card is the CIMC's own CPU, memory and IO percentages, the ones its summary page charts, which it measures through the management engine whatever OS is installed.
+the power draw. The worker reads every server once a minute and keeps the
+report, so a page opens with readings at once and says how old they are;
+**Read now** asks the BMC itself. The **Overview** tab shows the hottest
+sensor, inlet temperature, the fan speed range and power draw from the same
+report. Nothing here is estimated: it is what the BMC answered, with the
+time it answered. When IPMI is not answering (off, or an IPMI encryption key the panel does not have) the same readings come from Redfish's Thermal and Power resources and the page says so. The power figure is DCMI where the BMC has it, otherwise the PSU output sensors; input and output are never added together. The overview's **Utilisation** card is the CIMC's own CPU, memory and IO percentages, the ones its summary page charts, which it measures through the management engine whatever OS is installed.
 
 **Event log.** The **Event log** tab is the BMC's System Event Log: fan
 stalls, thermal trips, PSU events, with the sensor name resolved and the
@@ -425,6 +431,14 @@ again every minute, rather than going round through POST and PXE forever.
 That fall-through is the whole architecture working end to end: DHCP, TFTP,
 iPXE, the control plane, and the BMC. If it does not happen, nothing else
 will, so stop and check `journalctl -u dnsmasq` on the VM.
+
+**The management server itself.** The server the installer registers as
+`SIM-0001` (hostname `sim01`) has the role *management*: the panel shows its
+health, readings and event log but never powers, provisions or configures
+it, and every such request is refused with a clear message. Its BMC is the
+built-in simulator, so those readings are simulated; the VM's own services
+are on the Dashboard. The role is on the Edit form, so any server can be
+marked the same way.
 
 ## 8. Create a customer and hand them the server
 
@@ -618,6 +632,19 @@ the right address. For customer 1 on VLAN 1000 with `103.167.10.0/28`:
 nothing, rather than one of your public addresses. In the panel the block is
 `103.167.10.0/28`, gateway `103.167.10.1`, VLAN `1000`, and the server's
 primary address is `103.167.10.10`; the PXE MAC is on its Hardware tab.
+
+**What the panel does with this.** The server's **Network** tab shows,
+from the block's VLAN and gateway, the assigned address, the PXE MAC and
+the switch port, exactly what the router must hold for that server: the
+port's VLAN, the DHCP server for it, and the lease. It shows the RouterOS
+commands for it, so the two can be checked against each other. With
+`DOZ_ROUTEROS_URL`, `DOZ_ROUTEROS_USERNAME` and `DOZ_ROUTEROS_PASSWORD` set
+in `/etc/doz/doz.env` (a RouterOS 7 user with the `read`, `write`, `api` and
+`rest-api` policies, and the `www-ssl` service on), the panel applies it
+itself: when a primary address is assigned, at the start of every install,
+and from **Apply to router** on that tab. Releasing the address removes the
+lease. Either way the installer writes the address, prefix and gateway into
+the OS statically; nothing after the install depends on DHCP.
 
 **On the VM** nothing changes between customers. If you move the VM onto
 the services VLAN at this point, run

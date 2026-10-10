@@ -224,6 +224,7 @@ class AdminServerOut(ServerDetailOut):
     rack: str | None
     rack_unit: int | None
     switch_name: str | None
+    role: str = "customer"
     switch_port: str | None
     customer_vlan: int | None
     provisioning_mac: str | None
@@ -257,7 +258,11 @@ class ServerCreate(BaseModel):
     prepare_bmc: bool = True
 
 
+SERVER_ROLES = "^(customer|management)$"
+
+
 class ServerUpdate(BaseModel):
+    role: str | None = Field(default=None, pattern=SERVER_ROLES)
     hostname: str | None = None
     cimc_ip: str | None = None
     bmc_protocol: str | None = BMCProtocol

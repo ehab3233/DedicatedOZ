@@ -95,7 +95,14 @@ export default function ServerPage() {
           </Card>
         )}
 
-        <Card><div className="card-body tight"><PowerControls serverId={id} isAdmin activeJob={activeJob} onChanged={refresh} /></div></Card>
+        {s.role === 'management' ? (
+          <Banner kind="info">
+            <strong>Management server.</strong> The panel reads it (health, readings, event log) but does not power, provision or configure it from here.
+            {s.serial.startsWith('SIM-') && ' Its BMC is the built-in simulator, so the readings are simulated; the VM\'s own services are on the Dashboard.'}
+          </Banner>
+        ) : (
+          <Card><div className="card-body tight"><PowerControls serverId={id} isAdmin activeJob={activeJob} onChanged={refresh} /></div></Card>
+        )}
 
         <Tabs
           items={[

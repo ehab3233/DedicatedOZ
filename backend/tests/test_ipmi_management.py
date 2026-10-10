@@ -178,12 +178,37 @@ class FakeIpmi:
         return type("P", (), {"state": "on"})()
 
 
+class FakeRedis:
+    """The sensor cache without a Redis: a dict with the two calls used."""
+
+    def __init__(self) -> None:
+        self.data: dict[str, str] = {}
+
+    def set(self, key, value, ex=None):  # noqa: ANN001
+        self.data[key] = value
+
+    def get(self, key):  # noqa: ANN001
+        return self.data.get(key)
+
+    def delete(self, key):  # noqa: ANN001
+        self.data.pop(key, None)
+
+
 @pytest.fixture
-def fake_ipmi(monkeypatch):
+def sensor_cache(monkeypatch):
+    from app.services import sensors as sensors_service
+
+    fake = FakeRedis()
+    monkeypatch.setattr(sensors_service, "_client", lambda: fake)
+    return fake
+
+
+@pytest.fixture
+def fake_ipmi(monkeypatch, sensor_cache):
     fake = FakeIpmi()
     monkeypatch.setattr("app.api.admin_bmc._ipmi", lambda server, timeout=None: fake)
     monkeypatch.setattr(
-        "app.api.admin_bmc._utilization",
+        "app.services.sensors.utilization",
         lambda server: ({"overall": 7, "cpu": 5, "memory": 30, "io": 1}, None),
     )
     bmc_status._live.clear()
@@ -240,6 +265,34 @@ class TestLiveReadings:
         # The CIMC's own utilisation figures ride along with the sensors.
         assert body["utilization"] == {"overall": 7, "cpu": 5, "memory": 30, "io": 1}
         assert body["utilization_error"] is None
+
+    def test_the_kept_report_is_served_without_touching_the_bmc(
+        self, client, make_server, admin_headers, fake_ipmi, sensor_cache
+    ):
+        from app.services import sensors as sensors_service
+
+        server = make_server()
+        url = f"/api/v1/admin/servers/{server.id}/sensors"
+        client.get(url, headers=admin_headers)  # nothing kept yet: a live read, then kept
+        assert fake_ipmi.calls.count(("sensors",)) == 1
+        assert sensors_service.load(server.id)["via"] == "ipmi"
+        bmc_status._live.clear()  # another API process would have no in-memory copy
+        body = client.get(url, headers=admin_headers).json()
+        assert fake_ipmi.calls.count(("sensors",)) == 1 and body["via"] == "ipmi"
+        client.get(url + "?fresh=1", headers=admin_headers)
+        assert fake_ipmi.calls.count(("sensors",)) == 2
+
+    def test_the_worker_keeps_every_servers_report(self, db, make_server, fake_ipmi,
+                                                   sensor_cache, monkeypatch):
+        from app.services import sensors as sensors_service
+        from app.workers.tasks import sensors_all_task
+
+        monkeypatch.setattr("app.workers.tasks.get_ipmi_driver", lambda server, **kw: fake_ipmi)
+        a, b = make_server(), make_server()
+        assert sensors_all_task.run() == {"polled": 2, "failed": 0}
+        for server in (a, b):
+            kept = sensors_service.load(server.id)
+            assert kept["background"] is True and kept["power"]["watts"] == 185
 
     def test_sensors_fall_back_to_redfish_when_ipmi_is_off(
         self, client, make_server, admin_headers, fake_ipmi, monkeypatch

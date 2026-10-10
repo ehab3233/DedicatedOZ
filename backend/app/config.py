@@ -142,6 +142,33 @@ class Settings(BaseSettings):
     # itself before power cycling it anyway (longer than two polls).
     boot_park_window_seconds: int = 55
 
+    # BIOS power profile Prepare BMC sets: balanced (CPU power technology
+    # Energy Efficient, energy/performance bias Balanced Energy), low_power,
+    # performance, or empty to leave the BIOS alone. Applies at the next boot.
+    bmc_prepare_power_profile: str = "balanced"
+
+    # The worker reads every server's sensors on this timer and keeps the
+    # report in Redis for this long; the panel shows the kept report at once
+    # and reads live only on "Read now".
+    sensors_poll_interval_seconds: int = 60
+    sensors_cache_ttl_seconds: int = 600
+
+    # --- router automation (MikroTik RouterOS 7, REST API) ---------------
+    # With a URL set, assigning a server's primary address, and every
+    # install, program the router: its switch port into the block's VLAN
+    # and a PXE lease for its MAC. Empty = the Network tab shows the
+    # commands to paste instead.
+    routeros_url: str = ""  # e.g. https://10.20.0.1/rest
+    routeros_username: str = ""
+    routeros_password: str = ""
+    routeros_verify_tls: bool = False
+    routeros_bridge: str = "bridge"
+    routeros_boot_file: str = "undionly.kpxe"
+    # What PXE clients are sent to; empty = the control plane's host.
+    routeros_next_server: str = ""
+    routeros_dns_server: str = "1.1.1.1"
+    routeros_timeout_seconds: int = 15
+
     # --- console -----------------------------------------------------------
     ipmitool_path: str = "ipmitool"
     # A console with no traffic either way for this long is closed, which

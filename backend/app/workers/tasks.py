@@ -7,6 +7,7 @@ part that is actually specific to them.
 
 from __future__ import annotations
 
+import logging
 import time
 import uuid
 from collections.abc import Callable, Iterator
@@ -27,11 +28,14 @@ from app.enums import ActorType, JobState, JobType, PowerAction, RaidLevel, Serv
 from app.models import Image, Job, OSTemplate, Server
 from app.secrets import SecretNotFoundError
 from app.services import boot as boot_service
-from app.services import boot_assets, images, raid
+from app.services import boot_assets, images, network, raid
 from app.services import jobs as job_service
+from app.services import sensors as sensors_service
 from app.services.dispatch import enqueue
 from app.services.lifecycle import IllegalTransition, transition_server
 from app.workers.celery_app import celery_app
+
+log = logging.getLogger(__name__)
 
 
 class JobCancelled(RuntimeError):
@@ -275,6 +279,9 @@ def bmc_setup_task(self, job_id: str) -> dict:  # noqa: ANN001
                 boot_order = settings.bmc_prepare_boot_order.strip()
                 if boot_order:
                     steps.append(("boot_order", lambda: api.set_boot_order(boot_order)))
+                profile = settings.bmc_prepare_power_profile.strip()
+                if profile:
+                    steps.append(("power_profile", lambda: api.set_power_profile(profile)))
                 ntp = [s.strip() for s in settings.ntp_servers.split(",") if s.strip()]
                 if ntp:
                     steps.append(("ntp", lambda: api.set_ntp(ntp)))
@@ -580,6 +587,64 @@ def image_fetch_task(self, job_id: str) -> dict:  # noqa: ANN001
 # ---------------------------------------------------------------------------
 
 
+def _apply_network_for_install(db: Session, job: Job, server: Server, sink: LogSink) -> None:
+    """Program the router before the server PXE-boots, when the panel has one.
+
+    A server the panel cannot plan for (flat network, no VLAN on its block)
+    is noted and left alone; a router that refuses fails the job, because
+    the PXE boot would fail anyway.
+    """
+    if not network.configured():
+        return
+    try:
+        plan = network.plan_for(db, server)
+    except network.PlanError as exc:
+        job_service.log(db, job, f"router not programmed: {exc}", level="warning")
+        db.commit()
+        return
+    job_service.set_stage(
+        db, job, f"programming the router: {plan.port} into VLAN {plan.vlan}", progress=2
+    )
+    db.commit()
+    try:
+        summary = network.apply(plan, log=sink)
+    except network.NetworkError as exc:
+        raise RuntimeError(f"the router could not be programmed: {exc}") from exc
+    job_service.log(db, job, summary["description"], customer_visible=True)
+    db.commit()
+
+
+@celery_app.task(name="doz.provision.network_apply", bind=True, max_retries=0)
+def network_apply_task(self, job_id: str) -> dict:  # noqa: ANN001
+    """Switch port into the customer VLAN and a PXE lease, on the router."""
+    with job_runner(job_id) as ctx:
+        if ctx is None:
+            return {"skipped": True}
+        db, job, server = ctx
+        if server is None:
+            raise RuntimeError("network job has no server")
+        if not network.configured():
+            raise RuntimeError("no router configured (DOZ_ROUTEROS_URL on the management server)")
+        try:
+            plan = network.plan_for(db, server)
+        except network.PlanError as exc:
+            raise RuntimeError(str(exc)) from exc
+        sink = job_service.make_log_sink(db, job)
+        job_service.set_stage(
+            db, job, f"programming the router: {plan.port} into VLAN {plan.vlan}", progress=20
+        )
+        db.commit()
+        try:
+            summary = network.apply(plan, log=sink)
+        except network.NetworkError as exc:
+            raise RuntimeError(str(exc)) from exc
+        job.result = summary
+        job_service.set_stage(db, job, summary["description"][:64], progress=100)
+        db.commit()
+        return summary
+    return {"skipped": True}
+
+
 def _build_raid_for_install(db: Session, job: Job, server: Server, sink: LogSink) -> None:
     """Build the requested array through the BMC before the installer boots.
 
@@ -773,6 +838,7 @@ def install_task(self, job_id: str) -> dict:  # noqa: ANN001
         db.commit()
 
         sink = job_service.make_log_sink(db, job)
+        _apply_network_for_install(db, job, server, sink)
         _build_raid_for_install(db, job, server, sink)
         _check_cancel(db, job)
         with get_driver(server, log=sink) as driver:
@@ -888,6 +954,45 @@ def _safe_transition(db: Session, job: Job, server: Server, target: ServerState)
 # ---------------------------------------------------------------------------
 
 
+def _volumes_from_xml(server: Server, volumes: list[dict], sink: LogSink) -> list[dict]:
+    """The virtual drives as the CIMC's own storage objects describe them.
+
+    The M4's Redfish calls a RAID 1 "NonRedundant" and reports the sum of
+    its members as its size; the XML API's storageVirtualDrive has the real
+    level, size and state. Redfish's list is kept when the XML API is not
+    reachable.
+    """
+    if not volumes:
+        return volumes
+    try:
+        with CimcXmlApi(str(server.cimc_ip), credential_for(server), port=server.redfish_port,
+                        timeout=20, log=sink) as api:
+            rows = api.resolve_class("storageVirtualDrive")
+    except (BMCError, SecretNotFoundError, ValueError) as exc:
+        sink(f"virtual drives kept as Redfish lists them ({exc})", level="warning")
+        return volumes
+    by_name = {row.get("name"): row for row in rows}
+    out = []
+    for volume in volumes:
+        row = by_name.get(volume.get("name"))
+        if row is None:
+            out.append(volume)
+            continue
+        size_bytes = raid._parse_size(row.get("size") or "")
+        level = (row.get("raidLevel") or "").replace(" ", "")
+        status = row.get("vdStatus") or ""
+        out.append({
+            **volume,
+            "raid_type": level or volume.get("raid_type"),
+            "capacity_gb": (round(size_bytes / 1_000_000_000) if size_bytes
+                            else volume.get("capacity_gb")),
+            "health": "OK" if status.lower() == "optimal" else (status or volume.get("health")),
+            "state": status or None,
+            "boot_drive": (row.get("bootDrive") or "").lower() == "true",
+        })
+    return out
+
+
 def _sync_inventory(db: Session, server: Server, sink: LogSink = null_sink) -> dict:
     """Read hardware detail from the BMC into the database.
 
@@ -910,7 +1015,7 @@ def _sync_inventory(db: Session, server: Server, sink: LogSink = null_sink) -> d
         "model": inv.model,
         "nics": inv.nics,
         "drives": inv.drives,
-        "volumes": inv.volumes,
+        "volumes": _volumes_from_xml(server, inv.volumes, sink),
         "synced_at": datetime.now(UTC).isoformat(),
     }
     if inv.model:
@@ -1092,6 +1197,7 @@ TASK_FOR_JOB_TYPE: dict[JobType, Callable] = {
     JobType.VMEDIA_EJECT: vmedia_task,
     JobType.IMAGE_FETCH: image_fetch_task,
     JobType.RAID_CONFIGURE: raid_configure_task,
+    JobType.NETWORK_APPLY: network_apply_task,
     JobType.INSTALL: install_task,
     JobType.RESCUE: rescue_task,
     JobType.WIPE: wipe_task,
@@ -1105,6 +1211,27 @@ def dispatch(job: Job) -> str:
     task = TASK_FOR_JOB_TYPE[JobType(job.type)]
     async_result = task.delay(str(job.id))
     return async_result.id
+
+
+@celery_app.task(name="doz.poll.sensors_all", max_retries=0)
+def sensors_all_task() -> dict:
+    """Read every server's sensors into the shared cache, so the panel shows
+    readings the moment a page opens instead of after a slow BMC read."""
+    polled = failed = 0
+    with session_scope() as db:
+        servers = db.execute(
+            select(Server).where(Server.state != ServerState.RETIRED.value)
+        ).scalars().all()
+        for server in servers:
+            try:
+                report = sensors_service.collect(server, get_ipmi_driver(server))
+                report["background"] = True
+                sensors_service.store(server.id, report)
+                polled += 1
+            except (BMCError, SecretNotFoundError, ValueError) as exc:
+                failed += 1
+                log.info("sensors of %s not read: %s", server.serial, exc)
+    return {"polled": polled, "failed": failed}
 
 
 @celery_app.task(name="doz.poll.redispatch_queued", max_retries=0)
