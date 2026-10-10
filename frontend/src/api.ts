@@ -443,6 +443,8 @@ export const api = {
       reason?: string | null
       /** What each known HTML5 viewer path answered, for when none was found. */
       probe?: Array<{ path: string; status: number | null; viewer?: boolean; error?: string; location?: string | null }>
+      /** Whether the CIMC lets the viewer be shown inside the panel; null when unknown. */
+      embeddable?: boolean | null
     }>(
       `/api/v1/admin/servers/${id}/kvm`,
       { method: 'POST' },

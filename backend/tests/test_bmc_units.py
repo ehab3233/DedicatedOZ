@@ -123,6 +123,25 @@ class TestCimcXmlApi:
         assert [p["status"] for p in links["probe"]] == [404, 200]
 
     @responses.activate
+    def test_reports_whether_the_viewer_may_be_shown_inside_the_panel(self):
+        # The console tab frames the viewer when the CIMC lets it; a CIMC
+        # that forbids framing gets a tab instead of a blank frame.
+        for headers, expected in (({}, True),
+                                  ({"X-Frame-Options": "SAMEORIGIN"}, False),
+                                  ({"Content-Security-Policy": "frame-ancestors 'self'"}, False),
+                                  ({"Content-Security-Policy": "frame-ancestors *"}, True)):
+            responses.reset()
+            _login_ok(responses)
+            responses.add(responses.POST, NUOVA,
+                          body='<aaaGetComputeAuthTokens outTokens="1,2" response="yes"/>')
+            responses.add(responses.GET, f"https://{HOST}/html/kvmViewer.html", status=200,
+                          body="<html><title>KVM</title></html>", headers=headers)
+            _logout_ok(responses)
+            with CimcXmlApi(HOST, CRED) as api:
+                links = api.kvm_launch()
+            assert links["embeddable"] is expected, headers
+
+    @responses.activate
     def test_a_cimc_that_serves_its_login_page_for_any_path_is_not_a_viewer(self):
         # Some builds answer 200 with the login app for unknown paths; opening
         # that with tokens on the URL is what "KVM is not working" looks like.

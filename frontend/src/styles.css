@@ -568,3 +568,8 @@ details > summary { cursor: pointer; color: var(--text-2); font-size: 13px; }
 .attention-list li { display: flex; gap: 10px; align-items: center; padding: 8px 16px; border-bottom: 1px solid var(--border); font-size: 13px; }
 .attention-list li:last-child { border-bottom: 0; }
 .attention-list svg { width: 15px; height: 15px; flex: 0 0 auto; }
+
+/* The CIMC's vKVM inside the console tab. */
+.kvm-frame { display: block; width: 100%; height: min(72vh, 900px); min-height: 480px; border: 1px solid var(--border); border-radius: 8px; background: #000; }
+.kvm-placeholder { display: flex; align-items: center; justify-content: center; gap: 8px; color: var(--text-3); background: var(--surface-2); }
+.kvm-frame:fullscreen { border: 0; border-radius: 0; height: 100vh; }

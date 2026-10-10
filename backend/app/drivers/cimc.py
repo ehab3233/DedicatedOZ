@@ -29,6 +29,7 @@ against the CIMC's small session limit just like Redfish ones do.
 from __future__ import annotations
 
 import xml.etree.ElementTree as ET
+from typing import Any
 from urllib.parse import urlencode
 from xml.sax.saxutils import escape
 
@@ -60,6 +61,19 @@ HTML5_KVM_CANDIDATES = (
     "/html/kvm.html",
     "/kvmViewer.html",
 )
+
+
+def allows_framing(headers: Any) -> bool:
+    """Whether a browser may show this page inside another (the panel's
+    console tab). X-Frame-Options or a CSP frame-ancestors directive says no."""
+    option = (headers.get("X-Frame-Options") or "").strip().lower()
+    if option in {"deny", "sameorigin"} or option.startswith("allow-from"):
+        return False
+    policy = (headers.get("Content-Security-Policy") or "").lower()
+    if "frame-ancestors" in policy:
+        directive = policy.split("frame-ancestors", 1)[1].split(";", 1)[0]
+        return "*" in directive
+    return True
 
 
 def quoteattr(value: str) -> str:
@@ -461,6 +475,7 @@ class CimcXmlApi:
                     "tokens_unsupported": True,
                     "reason": text,
                     "probe": [],
+                    "embeddable": None,
                 }
             raise
         # The same four parameters Cisco documents for the Java launcher; the
@@ -479,8 +494,12 @@ class CimcXmlApi:
             if path:
                 html5 = f"{self.base_url}{path}?{query}"
         java = f"{self.base_url}/kvm.jnlp?{query}"
+        # Whether the panel may show the viewer inside its own page. Unknown
+        # (None) when the path came from the template rather than a probe.
+        embeddable = next((p.get("frameable") for p in probe if p.get("viewer")), None)
         return {"html5": html5, "java": java, "cimc": f"{self.base_url}/",
-                "tokens_unsupported": False, "reason": None, "probe": probe}
+                "tokens_unsupported": False, "reason": None, "probe": probe,
+                "embeddable": embeddable}
 
     def _probe_html5_viewer(self) -> tuple[str | None, list[dict]]:
         """Which of the known viewer paths this CIMC serves, with what each
@@ -500,10 +519,14 @@ class CimcXmlApi:
                 probe.append({"path": path, "status": None, "error": str(exc)[:120]})
                 continue
             viewer = resp.status_code == 200 and "kvm" in (resp.text or "")[:65536].lower()
-            probe.append({"path": path, "status": resp.status_code, "viewer": viewer,
-                          "location": resp.headers.get("Location")})
+            entry = {"path": path, "status": resp.status_code, "viewer": viewer,
+                     "location": resp.headers.get("Location")}
             if viewer:
-                self._log(f"HTML5 KVM viewer found at {path}")
+                entry["frameable"] = allows_framing(resp.headers)
+            probe.append(entry)
+            if viewer:
+                self._log(f"HTML5 KVM viewer found at {path}"
+                          + ("" if entry["frameable"] else "; it refuses to be framed"))
                 return path, probe
         self._log(
             "no HTML5 KVM viewer at any known path: "

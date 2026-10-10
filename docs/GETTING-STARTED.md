@@ -349,14 +349,19 @@ console viewer; if someone else has it, you are offered **Take over**. Idle
 consoles close after 30 minutes to free the slot. **Full page** opens the
 same console on a page of its own.
 
-**KVM.** The **KVM** button gets one-time tokens from the CIMC and opens its
-HTML5 viewer in a new tab: video from POST onwards, keyboard and mouse
+**KVM.** The **KVM** button opens the Console tab with the CIMC's HTML5
+viewer inside the page: video from POST onwards, keyboard and mouse
 passthrough, and the viewer's own virtual media for an ISO on your machine.
-Your browser talks to the CIMC directly, which works on the flat network.
-Open **CIMC** once first and accept its self-signed certificate, or the
-viewer tab is blocked. If your firmware keeps the viewer somewhere
-unexpected, the panel falls back to the Java launcher and the web UI, and
-the message says what each path it tried answered. To pin the right one:
+**Full screen** gives it the whole display; **Open in a tab** is the same
+viewer on its own. The panel gets one-time tokens from the CIMC for each
+connection, and they last about a minute, so **Reconnect** if the viewer
+asks you to log in. Your browser talks to the CIMC directly, which works on
+the flat network. Open **CIMC** once first and accept its self-signed
+certificate, or the frame stays blank. A CIMC that forbids being shown
+inside another page is detected and gets a tab instead. If your firmware
+keeps the viewer somewhere unexpected, the panel falls back to the Java
+launcher and the web UI, and the message says what each path it tried
+answered. To pin the right one:
 open the CIMC, use its own **Launch KVM → HTML based**, copy the link its
 pop-up shows, and set `DOZ_KVM_URL_TEMPLATE` to that link with `{host}`,
 `{tkn1}` and `{tkn2}` in place of the address and the two tokens. The Java
