@@ -115,8 +115,10 @@ class TestCimcXmlApi:
         _logout_ok(responses)
         with CimcXmlApi(HOST, CRED) as api:
             links = api.kvm_launch()
-        assert links["html5"] == f"https://{HOST}/html/kvm.html?tkn1=1804289383&tkn2=846930886"
-        assert links["java"].startswith(f"https://{HOST}/kvm.jnlp?cimcAddr={HOST}&cimcName=KVM&tkn1=")
+        assert links["html5"] == (f"https://{HOST}/html/kvm.html?cimcAddr={HOST}&cimcName=KVM"
+                                  "&tkn1=1804289383&tkn2=846930886")
+        assert links["java"] == (f"https://{HOST}/kvm.jnlp?cimcAddr={HOST}&cimcName=KVM"
+                                 "&tkn1=1804289383&tkn2=846930886")
         assert links["cimc"] == f"https://{HOST}/"
         assert [p["status"] for p in links["probe"]] == [404, 200]
 

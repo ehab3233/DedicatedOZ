@@ -463,7 +463,11 @@ class CimcXmlApi:
                     "probe": [],
                 }
             raise
-        query = urlencode({"tkn1": tkn1, "tkn2": tkn2})
+        # The same four parameters Cisco documents for the Java launcher; the
+        # HTML5 viewer at /html/kvmViewer.html is given them too, since the
+        # tokens alone are not enough for it to know which CIMC to talk to.
+        query = urlencode({"cimcAddr": self.host, "cimcName": "KVM",
+                           "tkn1": tkn1, "tkn2": tkn2})
         html5: str | None = None
         probe: list[dict] = []
         if settings.kvm_url_template:
@@ -474,9 +478,7 @@ class CimcXmlApi:
             path, probe = self._probe_html5_viewer()
             if path:
                 html5 = f"{self.base_url}{path}?{query}"
-        java_query = urlencode({"cimcAddr": self.host, "cimcName": "KVM",
-                                "tkn1": tkn1, "tkn2": tkn2})
-        java = f"{self.base_url}/kvm.jnlp?{java_query}"
+        java = f"{self.base_url}/kvm.jnlp?{query}"
         return {"html5": html5, "java": java, "cimc": f"{self.base_url}/",
                 "tokens_unsupported": False, "reason": None, "probe": probe}
 
