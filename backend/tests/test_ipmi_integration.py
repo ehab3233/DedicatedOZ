@@ -490,7 +490,10 @@ class TestLiveAdminApi:
         bmc_status._live.clear()
         body = client.get(f"/api/v1/admin/servers/{sim_server.id}/sensors",
                           headers=admin_headers).json()
-        assert body["via"] == "ipmi" and len(body["sensors"]) == 12 and body["power"] is None
+        assert body["via"] == "ipmi" and len(body["sensors"]) == 12
+        # The simulator has no DCMI, so the draw is estimated from its PSU sensor.
+        assert body["power"]["watts"] == 185 and body["power"]["source"] == "sensors"
+        assert body["utilization"] is None and body["utilization_error"]
         assert {s["name"] for s in body["sensors"] if s["kind"] == "temperature"} == {
             "CPU1 Temp", "CPU2 Temp", "Inlet Temp", "DIMM Temp"}
 

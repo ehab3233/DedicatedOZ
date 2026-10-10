@@ -7,7 +7,7 @@ import { TARGET_FIRMWARE, firmwareBelowTarget } from '../../../firmware'
 import { waitForJob } from '../../../hooks'
 import { useToast } from '../../../toast'
 import { AdminReinstallModal, AssignModal, InstallFromImageModal, WipeModal } from './modals'
-import { formatValue, useLiveSensors } from './Sensors'
+import { POWER_SOURCE, UtilisationCard, formatValue, useLiveSensors } from './Sensors'
 import { useServer } from './ServerPage'
 
 
@@ -45,7 +45,12 @@ export default function Overview() {
   const readings = sensors.report?.sensors ?? []
   const temps = readings.filter((r) => r.kind === 'temperature' && r.value != null)
   const fans = readings.filter((r) => r.kind === 'fan' && r.value != null)
-  const watts = sensors.report?.power?.watts ?? readings.filter((r) => r.kind === 'power' && r.unit === 'W' && r.value).reduce((a, r) => a + (r.value ?? 0), 0)
+  // The spread, not an average: one slow fan is the thing worth seeing.
+  const fanSpeeds = fans.map((f) => Math.round(f.value ?? 0))
+  const fanLow = Math.min(...fanSpeeds)
+  const fanHigh = Math.max(...fanSpeeds)
+  // DCMI, else the PSU output sensors (never input and output added together).
+  const power = sensors.report?.power ?? null
   const hottest = temps.slice().sort((a, b) => (b.value ?? 0) - (a.value ?? 0))[0]
   const worst = readings.some((r) => r.status === 'critical') ? 'critical' : readings.some((r) => r.status === 'warning') ? 'warning' : readings.length ? 'ok' : null
 
@@ -84,10 +89,10 @@ export default function Overview() {
           <Card
             title="Live readings"
             actions={worst ? <Pill value={worst} /> : null}
-            note={sensors.error ? 'Sensors need IPMI, which is not answering on this server.' : sensors.report ? `${sensors.report.stale ? 'Last good reading' : 'Read'} ${relativeTime(sensors.report.checked_at, now)} · every 10 s · ${readings.length} sensors on the Sensors tab${sensors.report.stale ? ' · the BMC missed the last poll' : ''}` : 'Reading sensors…'}
+            note={sensors.error ? 'Neither IPMI nor Redfish is answering on this server.' : sensors.report ? `${sensors.report.stale ? 'Last good reading' : 'Read'} ${relativeTime(sensors.report.checked_at, now)} · every 10 s${sensors.report.via === 'redfish' ? ' · via Redfish, IPMI is not answering' : ''} · ${readings.length} sensors on the Sensors tab${sensors.report.stale ? ' · the BMC missed the last poll' : ''}` : 'Reading sensors…'}
           >
             {sensors.error ? (
-              <Banner kind="warning">No readings: the BMC is not answering IPMI. <Link to={`/admin/servers/${s.id}/bmc`}>Test the connection</Link> on the BMC tab to see why.</Banner>
+              <Banner kind="warning">No readings: the BMC is answering neither IPMI nor Redfish. <Link to={`/admin/servers/${s.id}/bmc`}>Test the connection</Link> on the BMC tab to see why.</Banner>
             ) : readings.length === 0 ? (
               <div className="subtle">Waiting for the first reading…</div>
             ) : (
@@ -99,14 +104,16 @@ export default function Overview() {
                   <div key={t.name} className={`reading ${t.status}`}><div className="reading-label">{t.name}</div><div className="reading-value">{formatValue(t)}</div></div>
                 ))}
                 {fans.length > 0 && (
-                  <div className={`reading ${fans.some((f) => f.status !== 'ok') ? 'warning' : ''}`}><div className="reading-label">Fans ({fans.length})</div><div className="reading-value">{Math.round(fans.reduce((a, f) => a + (f.value ?? 0), 0) / fans.length)}<span className="sensor-unit">RPM avg</span></div></div>
+                  <div className={`reading ${fans.some((f) => f.status !== 'ok') ? 'warning' : ''}`}><div className="reading-label">Fans ({fans.length})</div><div className="reading-value">{fanLow === fanHigh ? fanLow : `${fanLow}–${fanHigh}`}<span className="sensor-unit">{fans[0].unit ?? 'RPM'}</span></div></div>
                 )}
-                {watts > 0 && (
-                  <div className="reading"><div className="reading-label">Power draw</div><div className="reading-value">{Math.round(watts)}<span className="sensor-unit">W</span></div></div>
+                {power && power.watts > 0 && (
+                  <div className="reading"><div className="reading-label">Power draw · {POWER_SOURCE[power.source ?? ''] ?? 'BMC'}</div><div className="reading-value">{Math.round(power.watts)}<span className="sensor-unit">W</span></div></div>
                 )}
               </div>
             )}
           </Card>
+
+          <UtilisationCard report={sensors.report} />
 
           <Card title="Provisioning" note="Reinstall and wipe destroy data. Rescue and boot-device changes do not.">
             <div className="stack" style={{ gap: 14 }}>

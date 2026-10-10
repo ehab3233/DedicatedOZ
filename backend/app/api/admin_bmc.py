@@ -20,7 +20,7 @@ from app.deps import client_ip, current_admin
 from app.drivers import BMCError, get_driver
 from app.drivers.cimc import CimcXmlApi
 from app.drivers.factory import cipher_for, credential_for, protocol_for
-from app.drivers.ipmi import IpmiDriver, ipmitool_path
+from app.drivers.ipmi import IpmiDriver, estimate_power, ipmitool_path
 from app.drivers.redfish import RedfishDriver
 from app.enums import ActorType, JobType, ServerState
 from app.models import Customer, Image, Job, Server
@@ -75,6 +75,31 @@ def _ipmi(server: Server, *, timeout: int | None = None) -> IpmiDriver:
         timeout=timeout or settings.bmc_status_timeout_seconds,
         retransmit=(1, 1),
     )
+
+
+def _redfish(server: Server, *, timeout: int | None = None) -> RedfishDriver:
+    try:
+        credential = credential_for(server)
+    except (SecretNotFoundError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=f"no CIMC credential: {exc}") from exc
+    return RedfishDriver(
+        host=str(server.cimc_ip), credential=credential, port=server.redfish_port,
+        system_path=server.redfish_system_path,
+        timeout=timeout or settings.bmc_status_timeout_seconds, retries=1,
+    )
+
+
+def _utilization(server: Server) -> tuple[dict | None, str | None]:
+    """The CIMC's own CPU, memory and IO figures, and why not if not."""
+    try:
+        with CimcXmlApi(str(server.cimc_ip), credential_for(server), port=server.redfish_port,
+                        timeout=10) as api:
+            figures = api.server_utilization()
+    except (BMCError, SecretNotFoundError, ValueError) as exc:
+        return None, str(exc)
+    if figures is None:
+        return None, "this CIMC does not report serverUtilization"
+    return figures, None
 
 
 def _bmc_call(fn):  # noqa: ANN001
@@ -342,18 +367,47 @@ def sensors(
     server_id: uuid.UUID, fresh: bool = Query(default=False), db: Session = Depends(get_db)
 ) -> dict:
     """Every sensor the BMC has, with its reading now: temperatures, fans,
-    voltages, power supplies, plus the DCMI power draw where the BMC has it."""
+    voltages, power supplies, the power draw (DCMI, else the PSU output
+    sensors) and the CIMC's own utilisation figures.
+
+    IPMI first; when it is off or its key is wrong, the Redfish Thermal and
+    Power resources carry most of the same readings.
+    """
     server = _server(db, server_id)
     driver = _ipmi(server, timeout=45)
 
     def read() -> dict:
-        readings = driver.sensors()
-        return {
-            "sensors": readings,
-            "power": driver.power_reading(),
+        try:
+            readings = driver.sensors()
+            report = {
+                "sensors": readings,
+                "power": driver.power_reading() or estimate_power(readings),
+                "via": "ipmi",
+                "fallback_reason": None,
+            }
+        except BMCError as ipmi_error:
+            redfish = _redfish(server)
+            try:
+                readings = redfish.sensors()
+                report = {
+                    "sensors": readings,
+                    "power": redfish.power_reading() or estimate_power(readings),
+                    "via": "redfish",
+                    "fallback_reason": str(ipmi_error),
+                }
+            except BMCError as redfish_error:
+                raise BMCError(
+                    f"IPMI: {ipmi_error}. Redfish: {redfish_error}"
+                ) from redfish_error
+            finally:
+                redfish.close()
+        utilization, why_not = _utilization(server)
+        report.update({
+            "utilization": utilization,
+            "utilization_error": why_not,
             "checked_at": _now(),
-            "via": "ipmi",
-        }
+        })
+        return report
 
     return _bmc_call(lambda: bmc_status.cached("sensors", server.id, read, fresh=fresh))
 

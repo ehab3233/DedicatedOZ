@@ -110,13 +110,31 @@ class TestCimcXmlApi:
                  'response="yes"/>',
         )
         responses.add(responses.GET, f"https://{HOST}/html/kvmViewer.html", status=404)
-        responses.add(responses.GET, f"https://{HOST}/html/kvm.html", status=200, body="<html>")
+        responses.add(responses.GET, f"https://{HOST}/html/kvm.html", status=200,
+                      body="<html><title>KVM Console</title></html>")
         _logout_ok(responses)
         with CimcXmlApi(HOST, CRED) as api:
             links = api.kvm_launch()
         assert links["html5"] == f"https://{HOST}/html/kvm.html?tkn1=1804289383&tkn2=846930886"
-        assert links["java"].startswith(f"https://{HOST}/kvm.jnlp?cimcAddr={HOST}&tkn1=")
+        assert links["java"].startswith(f"https://{HOST}/kvm.jnlp?cimcAddr={HOST}&cimcName=KVM&tkn1=")
         assert links["cimc"] == f"https://{HOST}/"
+        assert [p["status"] for p in links["probe"]] == [404, 200]
+
+    @responses.activate
+    def test_a_cimc_that_serves_its_login_page_for_any_path_is_not_a_viewer(self):
+        # Some builds answer 200 with the login app for unknown paths; opening
+        # that with tokens on the URL is what "KVM is not working" looks like.
+        _login_ok(responses)
+        responses.add(responses.POST, NUOVA,
+                      body='<aaaGetComputeAuthTokens outTokens="1,2" response="yes"/>')
+        for path in ("/html/kvmViewer.html", "/html/kvm.html", "/kvmViewer.html"):
+            responses.add(responses.GET, f"https://{HOST}{path}", status=200,
+                          body="<html><body>Cisco IMC login</body></html>")
+        _logout_ok(responses)
+        with CimcXmlApi(HOST, CRED) as api:
+            links = api.kvm_launch()
+        assert links["html5"] is None
+        assert all(p["status"] == 200 and p["viewer"] is False for p in links["probe"])
 
     @responses.activate
     def test_no_viewer_found_still_offers_java_and_the_web_ui(self):
@@ -598,6 +616,45 @@ class TestRaidEndpoint:
         assert queued.status_code == 202, queued.text
         assert queued.json()["type"] == "raid_configure"
         assert dispatched == [queued.json()["id"]]
+
+
+class TestServerUtilization:
+    """The CIMC summary page's CPU / memory / IO chart, read the same way."""
+
+    @responses.activate
+    def test_reads_the_four_figures(self):
+        _login_ok(responses)
+        responses.add(responses.POST, NUOVA, body=(
+            '<configResolveClass response="yes" classId="serverUtilization"><outConfigs>'
+            '<serverUtilization dn="sys/rack-unit-1/utilization" overallUtilization="12" '
+            'cpuUtilization="9" memoryUtilization="31" ioUtilization="2"/>'
+            '</outConfigs></configResolveClass>'
+        ))
+        _logout_ok(responses)
+        with CimcXmlApi(HOST, CRED) as api:
+            assert api.server_utilization() == {"overall": 12, "cpu": 9, "memory": 31, "io": 2}
+        assert 'classId="serverUtilization"' in responses.calls[1].request.body.decode()
+
+    @responses.activate
+    def test_figures_the_cimc_has_not_got_are_none(self):
+        # "N/A" while the host is off; the object itself missing on a build
+        # without it. Neither is an error for the sensors page.
+        _login_ok(responses)
+        responses.add(responses.POST, NUOVA, body=(
+            '<configResolveClass response="yes" classId="serverUtilization"><outConfigs>'
+            '<serverUtilization dn="sys/rack-unit-1/utilization" overallUtilization="N/A" '
+            'cpuUtilization="N/A" memoryUtilization="N/A" ioUtilization="N/A"/>'
+            '</outConfigs></configResolveClass>'
+        ))
+        responses.add(responses.POST, NUOVA, body=(
+            '<configResolveClass response="yes" errorCode="103" '
+            'errorDescr="unknown class serverUtilization"/>'
+        ))
+        _logout_ok(responses)
+        with CimcXmlApi(HOST, CRED) as api:
+            assert api.server_utilization() == {"overall": None, "cpu": None,
+                                                "memory": None, "io": None}
+            assert api.server_utilization() is None
 
 
 class TestKvmTokensUnsupported:

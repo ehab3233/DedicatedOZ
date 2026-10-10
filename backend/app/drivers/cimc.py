@@ -404,9 +404,43 @@ class CimcXmlApi:
             raise BMCError("aaaGetComputeAuthTokens returned no tokens")
         return tokens[0], tokens[1]
 
+    # -- utilisation -----------------------------------------------------
+
+    def server_utilization(self) -> dict[str, int | None] | None:
+        """The CIMC's own CPU, memory and IO utilisation, in percent.
+
+        This is the `serverUtilization` object the CIMC summary page charts
+        (one per rack unit; the figures come from the Intel management
+        engine's CUPS counters). A CIMC without the object, or with nothing
+        to report, gives None rather than an error: the panel shows "not
+        reported" and carries on.
+        """
+        try:
+            rows = self.resolve_class("serverUtilization")
+        except BMCError as exc:
+            self._log(f"serverUtilization not readable: {exc}", level="warning")
+            return None
+        if not rows:
+            return None
+        row = rows[0]
+
+        def percent(key: str) -> int | None:
+            value = (row.get(key) or "").strip()
+            try:
+                return max(0, min(100, int(float(value))))
+            except ValueError:
+                return None  # "N/A" while the host is off
+
+        return {
+            "overall": percent("overallUtilization"),
+            "cpu": percent("cpuUtilization"),
+            "memory": percent("memoryUtilization"),
+            "io": percent("ioUtilization"),
+        }
+
     # -- KVM -------------------------------------------------------------
 
-    def kvm_launch(self) -> dict[str, str | bool | None]:
+    def kvm_launch(self) -> dict[str, str | bool | None | list]:
         """One-time vKVM launch URLs. Tokens expire quickly; open immediately.
 
         Older CIMC builds answer `aaaGetComputeAuthTokens` with "Method not
@@ -426,36 +460,55 @@ class CimcXmlApi:
                     "cimc": f"{self.base_url}/",
                     "tokens_unsupported": True,
                     "reason": text,
+                    "probe": [],
                 }
             raise
         query = urlencode({"tkn1": tkn1, "tkn2": tkn2})
         html5: str | None = None
+        probe: list[dict] = []
         if settings.kvm_url_template:
             html5 = settings.kvm_url_template.format(
                 host=self.base_url.removeprefix("https://"), tkn1=tkn1, tkn2=tkn2
             )
         else:
-            path = self._probe_html5_viewer()
+            path, probe = self._probe_html5_viewer()
             if path:
                 html5 = f"{self.base_url}{path}?{query}"
-        java_query = urlencode({"cimcAddr": self.host, "tkn1": tkn1, "tkn2": tkn2})
+        java_query = urlencode({"cimcAddr": self.host, "cimcName": "KVM",
+                                "tkn1": tkn1, "tkn2": tkn2})
         java = f"{self.base_url}/kvm.jnlp?{java_query}"
         return {"html5": html5, "java": java, "cimc": f"{self.base_url}/",
-                "tokens_unsupported": False, "reason": None}
+                "tokens_unsupported": False, "reason": None, "probe": probe}
 
-    def _probe_html5_viewer(self) -> str | None:
+    def _probe_html5_viewer(self) -> tuple[str | None, list[dict]]:
+        """Which of the known viewer paths this CIMC serves, with what each
+        answered, so a miss can be read from the panel rather than guessed at.
+
+        Only a page that actually mentions the KVM counts: a CIMC that serves
+        its login page for any path would otherwise "have" the first path
+        tried, and the panel would open a login screen with tokens on it.
+        """
+        probe: list[dict] = []
         for path in HTML5_KVM_CANDIDATES:
             try:
                 resp = self._session.get(
                     f"{self.base_url}{path}", timeout=self._timeout, allow_redirects=False
                 )
-            except requests.RequestException:
+            except requests.RequestException as exc:
+                probe.append({"path": path, "status": None, "error": str(exc)[:120]})
                 continue
-            if resp.status_code != 404:
-                self._log(f"HTML5 KVM viewer found at {path} (HTTP {resp.status_code})")
-                return path
-        self._log("no HTML5 KVM viewer found at any known path", level="warning")
-        return None
+            viewer = resp.status_code == 200 and "kvm" in (resp.text or "")[:65536].lower()
+            probe.append({"path": path, "status": resp.status_code, "viewer": viewer,
+                          "location": resp.headers.get("Location")})
+            if viewer:
+                self._log(f"HTML5 KVM viewer found at {path}")
+                return path, probe
+        self._log(
+            "no HTML5 KVM viewer at any known path: "
+            + ", ".join(f"{p['path']} -> {p.get('status') or p.get('error')}" for p in probe),
+            level="warning",
+        )
+        return None, probe
 
 
 def _redact_xml(text: str) -> str:

@@ -626,3 +626,69 @@ class TestRaid:
         assert summary["kept"] is True and summary["volume"] == "old"
         assert not any(c.request.method in ("DELETE", "POST") and "Volumes" in c.request.url
                        for c in responses.calls)
+
+
+class TestSensors:
+    """Thermal and Power as a sensor list, for when IPMI is off."""
+
+    CHASSIS = "/redfish/v1/Chassis/1"
+
+    def _register(self, rsps, thermal: dict, power: dict) -> None:
+        rsps.add(rsps.GET, f"{BASE}/redfish/v1/Chassis",
+                 json={"Members": [{"@odata.id": self.CHASSIS}]})
+        rsps.add(rsps.GET, f"{BASE}{self.CHASSIS}", json={
+            "Id": "1", "Thermal": {"@odata.id": f"{self.CHASSIS}/Thermal"},
+            "Power": {"@odata.id": f"{self.CHASSIS}/Power"},
+        })
+        rsps.add(rsps.GET, f"{BASE}{self.CHASSIS}/Thermal", json=thermal)
+        rsps.add(rsps.GET, f"{BASE}{self.CHASSIS}/Power", json=power)
+
+    @responses.activate
+    def test_readings_take_the_shape_of_the_ipmi_listing(self):
+        self._register(responses, thermal={
+            "Temperatures": [
+                {"Name": "FRONT_TEMP", "ReadingCelsius": 24,
+                 "Status": {"Health": "OK", "State": "Enabled"}},
+                {"Name": "CPU2_TEMP", "ReadingCelsius": None,
+                 "Status": {"State": "Absent"}},
+            ],
+            "Fans": [
+                {"Name": "FAN1_TACH1", "Reading": 9100, "ReadingUnits": "RPM",
+                 "Status": {"Health": "OK", "State": "Enabled"}},
+                {"Name": "FAN2", "Reading": 45, "ReadingUnits": "Percent",
+                 "Status": {"Health": "Warning", "State": "Enabled"}},
+            ],
+        }, power={
+            "Voltages": [{"Name": "P12V", "ReadingVolts": 12.1,
+                          "Status": {"Health": "OK", "State": "Enabled"}}],
+            "PowerSupplies": [
+                {"Name": "PSU1", "LastPowerOutputWatts": 112, "PowerInputWatts": 130,
+                 "Status": {"Health": "OK", "State": "Enabled"}},
+                {"Name": "PSU2", "Status": {"State": "Absent"}},
+            ],
+            "PowerControl": [{
+                "PowerConsumedWatts": 221.4,
+                "PowerMetrics": {"MinConsumedWatts": 180, "MaxConsumedWatts": 260,
+                                 "AverageConsumedWatts": 210},
+            }],
+        })
+        d = driver()
+        readings = {r["name"]: r for r in d.sensors()}
+        assert readings["FRONT_TEMP"]["value"] == 24 and readings["FRONT_TEMP"]["unit"] == "°C"
+        assert readings["FRONT_TEMP"]["kind"] == "temperature"
+        assert readings["FRONT_TEMP"]["status"] == "ok"
+        assert readings["CPU2_TEMP"]["status"] == "no_reading"
+        assert readings["FAN1_TACH1"]["unit"] == "RPM" and readings["FAN1_TACH1"]["kind"] == "fan"
+        assert readings["FAN2"]["unit"] == "%" and readings["FAN2"]["status"] == "warning"
+        assert readings["P12V"]["kind"] == "voltage" and readings["P12V"]["value"] == 12.1
+        assert readings["PSU1 output"]["value"] == 112 and readings["PSU1 input"]["value"] == 130
+        assert readings["PSU2 output"]["status"] == "no_reading"
+        assert d.power_reading() == {"watts": 221, "minimum": 180, "maximum": 260,
+                                     "average": 210, "source": "redfish"}
+
+    @responses.activate
+    def test_nothing_listed_is_an_error_not_an_empty_page(self):
+        responses.add(responses.GET, f"{BASE}/redfish/v1/Chassis", json={"Members": []})
+        with pytest.raises(BMCError, match="list no sensors"):
+            driver().sensors()
+        assert driver().power_reading() is None

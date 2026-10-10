@@ -352,6 +352,7 @@ class IpmiDriver(BMCDriver):
             "minimum": _int_prefix(fields.get("Minimum during sampling period")),
             "maximum": _int_prefix(fields.get("Maximum during sampling period")),
             "average": _int_prefix(fields.get("Average power reading over sample period")),
+            "source": "dcmi",
         }
 
     def sel_info(self) -> dict:
@@ -574,6 +575,35 @@ def parse_sdr_elist(text: str) -> list[dict]:
             }
         )
     return sensors
+
+
+def estimate_power(sensors: list[dict]) -> dict | None:
+    """Power draw from the PSU sensors, for a BMC without DCMI.
+
+    A CIMC lists each supply's input and output (PSU1_PIN, PSU1_POUT, ...).
+    Adding every wattage sensor counts each supply twice, which is what the
+    overview used to show. Output is what the server draws; input is that plus
+    the supply's own losses; everything else is a last resort.
+    """
+    watts = [
+        s for s in sensors
+        if s.get("unit") == "W" and s.get("value") is not None
+        and s.get("status") != "no_reading"
+    ]
+    if not watts:
+        return None
+    source, chosen = "sensors", watts
+    for candidate, pattern in (("psu_output", r"p_?out|output"),
+                               ("psu_input", r"p_?in\b|input|ac_?in")):
+        matched = [s for s in watts if re.search(pattern, s["name"], re.IGNORECASE)]
+        if matched:
+            source, chosen = candidate, matched
+            break
+    return {
+        "watts": round(sum(s["value"] for s in chosen)),
+        "minimum": None, "maximum": None, "average": None,
+        "source": source,
+    }
 
 
 def _sel_timestamp(date: str, clock: str) -> str | None:

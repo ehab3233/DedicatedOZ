@@ -355,15 +355,19 @@ passthrough, and the viewer's own virtual media for an ISO on your machine.
 Your browser talks to the CIMC directly, which works on the flat network.
 Open **CIMC** once first and accept its self-signed certificate, or the
 viewer tab is blocked. If your firmware keeps the viewer somewhere
-unexpected, the panel falls back to the Java launcher and the web UI (and
-`DOZ_KVM_URL_TEMPLATE` pins the path once you know it).
+unexpected, the panel falls back to the Java launcher and the web UI, and
+the message says what each path it tried answered. To pin the right one:
+open the CIMC, use its own **Launch KVM → HTML based**, copy the link its
+pop-up shows, and set `DOZ_KVM_URL_TEMPLATE` to that link with `{host}`,
+`{tkn1}` and `{tkn2}` in place of the address and the two tokens. The Java
+launcher (`kvm.jnlp`) needs a Java Web Start such as OpenWebStart.
 
 **Sensors.** The **Sensors** tab reads every sensor the BMC has over IPMI:
 temperatures, fans, voltages, PSU output and, where the BMC supports DCMI,
 the power draw. It re-reads every ten seconds while the tab is open, and
-the **Overview** tab shows the hottest sensor, inlet temperature, fan
-average and power draw at the same rate. Nothing here is stored or
-estimated: it is what the BMC answered, with the time it answered.
+the **Overview** tab shows the hottest sensor, inlet temperature, the fan
+speed range and power draw at the same rate. Nothing here is stored or
+estimated: it is what the BMC answered, with the time it answered. When IPMI is not answering (off, or an IPMI encryption key the panel does not have) the same readings come from Redfish's Thermal and Power resources and the page says so. The power figure is DCMI where the BMC has it, otherwise the PSU output sensors; input and output are never added together. The overview's **Utilisation** card is the CIMC's own CPU, memory and IO percentages, the ones its summary page charts, which it measures through the management engine whatever OS is installed.
 
 **Event log.** The **Event log** tab is the BMC's System Event Log: fan
 stalls, thermal trips, PSU events, with the sensor name resolved and the

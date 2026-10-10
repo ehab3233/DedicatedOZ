@@ -855,6 +855,108 @@ class RedfishDriver(BMCDriver):
                     pass
         return out
 
+    # -- sensors ------------------------------------------------------------
+
+    def _chassis_resources(self) -> list[tuple[str, dict | None, dict | None]]:
+        """(chassis id, Power, Thermal) for every chassis the BMC exposes."""
+        out: list[tuple[str, dict | None, dict | None]] = []
+        try:
+            members = self._get("/redfish/v1/Chassis").get("Members") or []
+        except BMCError:
+            return out
+        for ref in members:
+            try:
+                chassis = self._get(ref["@odata.id"])
+            except BMCError:
+                continue
+            resources: dict[str, dict | None] = {"Power": None, "Thermal": None}
+            for key in resources:
+                path = (chassis.get(key) or {}).get("@odata.id")
+                if path:
+                    try:
+                        resources[key] = self._get(path)
+                    except BMCError:
+                        pass
+            out.append((str(chassis.get("Id") or ref["@odata.id"]),
+                        resources["Power"], resources["Thermal"]))
+        return out
+
+    def _reading(self, name: str | None, value: Any, unit: str, kind: str,
+                 obj: dict, entity: str) -> dict:
+        status_block = obj.get("Status") or {}
+        if isinstance(value, str):
+            try:
+                value = float(value)
+            except ValueError:
+                value = None
+        if value is None:
+            status = "no_reading"
+        else:
+            status = self._map_health(status_block.get("Health"))
+            if status == "unknown" and status_block.get("State") == "Enabled":
+                status = "ok"
+        return {
+            "name": name or kind,
+            "number": None,
+            "status": status,
+            "raw_status": status_block.get("Health") or status_block.get("State") or "",
+            "entity": entity,
+            "reading": f"{value:g} {unit}".strip() if value is not None
+            else (status_block.get("State") or "no reading"),
+            "value": value,
+            "unit": unit,
+            "kind": kind,
+        }
+
+    def sensors(self) -> list[dict]:
+        """Temperatures, fans, voltages and supplies from the chassis Thermal
+        and Power resources, in the shape of the IPMI SDR listing.
+
+        The panel falls back to this when IPMI is off or its key is wrong,
+        so the readings do not disappear with it.
+        """
+        readings: list[dict] = []
+        for entity, power, thermal in self._chassis_resources():
+            for t in (thermal or {}).get("Temperatures") or []:
+                readings.append(self._reading(
+                    t.get("Name"), t.get("ReadingCelsius"), "°C", "temperature", t, entity))
+            for fan in (thermal or {}).get("Fans") or []:
+                units = str(fan.get("ReadingUnits") or "RPM")
+                unit = "%" if units.lower().startswith("percent") else units
+                readings.append(self._reading(
+                    fan.get("Name") or fan.get("FanName"), fan.get("Reading"), unit, "fan",
+                    fan, entity))
+            for v in (power or {}).get("Voltages") or []:
+                readings.append(self._reading(
+                    v.get("Name"), v.get("ReadingVolts"), "V", "voltage", v, entity))
+            for ps in (power or {}).get("PowerSupplies") or []:
+                name = ps.get("Name") or f"PSU{ps.get('MemberId', '')}"
+                readings.append(self._reading(
+                    f"{name} output", ps.get("LastPowerOutputWatts"), "W", "power", ps, entity))
+                if ps.get("PowerInputWatts") is not None:
+                    readings.append(self._reading(
+                        f"{name} input", ps.get("PowerInputWatts"), "W", "power", ps, entity))
+        if not readings:
+            raise BMCError("the Redfish Thermal and Power resources list no sensors")
+        return readings
+
+    def power_reading(self) -> dict | None:
+        """Platform power from PowerControl, the Redfish equivalent of DCMI."""
+        for _, power, _ in self._chassis_resources():
+            for control in (power or {}).get("PowerControl") or []:
+                watts = control.get("PowerConsumedWatts")
+                if watts is None:
+                    continue
+                metrics = control.get("PowerMetrics") or {}
+                return {
+                    "watts": round(watts),
+                    "minimum": metrics.get("MinConsumedWatts"),
+                    "maximum": metrics.get("MaxConsumedWatts"),
+                    "average": metrics.get("AverageConsumedWatts"),
+                    "source": "redfish",
+                }
+        return None
+
     @staticmethod
     def _map_health(value: str | None) -> str:
         return {

@@ -441,6 +441,8 @@ export const api = {
       firmware: string | null
       tokens_unsupported?: boolean
       reason?: string | null
+      /** What each known HTML5 viewer path answered, for when none was found. */
+      probe?: Array<{ path: string; status: number | null; viewer?: boolean; error?: string; location?: string | null }>
     }>(
       `/api/v1/admin/servers/${id}/kvm`,
       { method: 'POST' },
@@ -668,11 +670,25 @@ export interface Sensor {
   kind: SensorKind
 }
 
+export type PowerSource = 'dcmi' | 'redfish' | 'psu_output' | 'psu_input' | 'sensors'
+
+export interface Utilization {
+  overall: number | null
+  cpu: number | null
+  memory: number | null
+  io: number | null
+}
+
 export interface SensorReport {
   sensors: Sensor[]
-  power: { watts: number; minimum: number | null; maximum: number | null; average: number | null } | null
+  power: { watts: number; minimum: number | null; maximum: number | null; average: number | null; source?: PowerSource } | null
+  /** The CIMC's own CPU / memory / IO figures in percent; null when the BMC has none. */
+  utilization: Utilization | null
+  utilization_error?: string | null
   checked_at: string
+  /** 'ipmi', or 'redfish' when IPMI was not answering (fallback_reason says why). */
   via: string
+  fallback_reason?: string | null
   /** The BMC missed the last poll; these are the last good readings. */
   stale?: boolean
   error?: string

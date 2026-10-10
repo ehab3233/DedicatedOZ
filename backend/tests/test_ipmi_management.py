@@ -182,8 +182,42 @@ class FakeIpmi:
 def fake_ipmi(monkeypatch):
     fake = FakeIpmi()
     monkeypatch.setattr("app.api.admin_bmc._ipmi", lambda server, timeout=None: fake)
+    monkeypatch.setattr(
+        "app.api.admin_bmc._utilization",
+        lambda server: ({"overall": 7, "cpu": 5, "memory": 30, "io": 1}, None),
+    )
     bmc_status._live.clear()
     return fake
+
+
+class FakeRedfish:
+    """What the Redfish fallback answers when IPMI is off."""
+
+    def __init__(self, fail: BMCError | None = None) -> None:
+        self.fail = fail
+        self.closed = False
+
+    def sensors(self):
+        if self.fail:
+            raise self.fail
+        return [
+            {"name": "Front Temp", "number": None, "status": "ok", "raw_status": "OK",
+             "entity": "1", "reading": "24 °C", "value": 24.0, "unit": "°C",
+             "kind": "temperature"},
+            {"name": "FAN1_TACH1", "number": None, "status": "ok", "raw_status": "OK",
+             "entity": "1", "reading": "9100 RPM", "value": 9100.0, "unit": "RPM",
+             "kind": "fan"},
+            {"name": "PSU1 output", "number": None, "status": "ok", "raw_status": "OK",
+             "entity": "1", "reading": "150 W", "value": 150.0, "unit": "W", "kind": "power"},
+            {"name": "PSU1 input", "number": None, "status": "ok", "raw_status": "OK",
+             "entity": "1", "reading": "170 W", "value": 170.0, "unit": "W", "kind": "power"},
+        ]
+
+    def power_reading(self):
+        return None
+
+    def close(self):
+        self.closed = True
 
 
 @pytest.fixture
@@ -203,6 +237,68 @@ class TestLiveReadings:
         assert fake_ipmi.calls.count(("sensors",)) == 1  # second read served from cache
         client.get(url + "?fresh=1", headers=admin_headers)
         assert fake_ipmi.calls.count(("sensors",)) == 2
+        # The CIMC's own utilisation figures ride along with the sensors.
+        assert body["utilization"] == {"overall": 7, "cpu": 5, "memory": 30, "io": 1}
+        assert body["utilization_error"] is None
+
+    def test_sensors_fall_back_to_redfish_when_ipmi_is_off(
+        self, client, make_server, admin_headers, fake_ipmi, monkeypatch
+    ):
+        fake_ipmi.fail = BMCError("Unable to establish IPMI v2 / RMCP+ session")
+        redfish = FakeRedfish()
+        monkeypatch.setattr("app.api.admin_bmc._redfish", lambda server, timeout=None: redfish)
+        server = make_server()
+        body = client.get(f"/api/v1/admin/servers/{server.id}/sensors",
+                          headers=admin_headers).json()
+        assert body["via"] == "redfish" and "RMCP+" in body["fallback_reason"]
+        assert {s["name"] for s in body["sensors"]} == {"Front Temp", "FAN1_TACH1",
+                                                        "PSU1 output", "PSU1 input"}
+        # No DCMI over Redfish: the draw is the PSU output, not output plus input.
+        assert body["power"] == {"watts": 150, "minimum": None, "maximum": None,
+                                 "average": None, "source": "psu_output"}
+        assert redfish.closed
+
+    def test_both_transports_failing_names_both(
+        self, client, make_server, admin_headers, fake_ipmi, monkeypatch
+    ):
+        fake_ipmi.fail = BMCError("IPMI dead")
+        monkeypatch.setattr("app.api.admin_bmc._redfish",
+                            lambda server, timeout=None: FakeRedfish(BMCError("Redfish dead")))
+        server = make_server()
+        response = client.get(f"/api/v1/admin/servers/{server.id}/sensors",
+                              headers=admin_headers)
+        assert response.status_code == 502
+        assert "IPMI: IPMI dead" in response.json()["detail"]
+        assert "Redfish: Redfish dead" in response.json()["detail"]
+
+
+class TestPowerEstimate:
+    """The overview's power figure when the BMC has no DCMI."""
+
+    def _sensor(self, name, value, unit="W", status="ok"):
+        return {"name": name, "value": value, "unit": unit, "status": status}
+
+    def test_psu_output_is_preferred_and_input_never_added_to_it(self):
+        from app.drivers.ipmi import estimate_power
+
+        readings = [
+            self._sensor("PSU1_PIN", 130), self._sensor("PSU1_POUT", 112),
+            self._sensor("PSU2_PIN", 128), self._sensor("PSU2_POUT", 110),
+            self._sensor("P12V", 12.1, "V"),
+        ]
+        assert estimate_power(readings) == {"watts": 222, "minimum": None, "maximum": None,
+                                            "average": None, "source": "psu_output"}
+
+    def test_input_when_there_is_no_output_and_everything_as_a_last_resort(self):
+        from app.drivers.ipmi import estimate_power
+
+        inputs = [self._sensor("PSU1_PIN", 130), self._sensor("PSU2_PIN", 0, status="no_reading")]
+        assert estimate_power(inputs)["watts"] == 130
+        assert estimate_power(inputs)["source"] == "psu_input"
+        other = [self._sensor("PSU1 Power", 185), self._sensor("PSU2 Power", 0)]
+        assert estimate_power(other) == {"watts": 185, "minimum": None, "maximum": None,
+                                         "average": None, "source": "sensors"}
+        assert estimate_power([self._sensor("P12V", 12.0, "V")]) is None
 
     def test_event_log_is_newest_first_and_clearing_is_audited(
         self, client, db, make_server, admin_headers, fake_ipmi

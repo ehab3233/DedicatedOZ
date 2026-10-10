@@ -43,6 +43,44 @@ export function useLiveSensors(serverId: string, intervalMs = 10000, enabled = t
   return { report, error, loading, read }
 }
 
+export const POWER_SOURCE: Record<string, string> = {
+  dcmi: 'DCMI',
+  redfish: 'Redfish',
+  psu_output: 'PSU output',
+  psu_input: 'PSU input',
+  sensors: 'power sensors',
+}
+
+/**
+ * The CIMC's own utilisation figures, the ones its summary page charts. They
+ * come from the Intel management engine (CUPS), not from the OS, so they are
+ * there whatever is installed, and blank while the host is off.
+ */
+export function UtilisationCard({ report }: { report: SensorReport | null }) {
+  if (!report) return null
+  const u = report.utilization
+  const rows: Array<[string, number | null]> = u
+    ? [['Overall', u.overall], ['CPU', u.cpu], ['Memory', u.memory], ['IO', u.io]]
+    : []
+  return (
+    <Card title="Utilisation" note="As the CIMC measures it: CPU, memory and IO from the management engine, independent of the OS. Blank while the host is off.">
+      {!u ? (
+        <div className="subtle small">Not reported by this BMC{report.utilization_error ? ` (${report.utilization_error})` : ''}.</div>
+      ) : (
+        <div className="stack" style={{ gap: 10 }}>
+          {rows.map(([name, value]) => (
+            <div key={name} className="row" style={{ gap: 12, alignItems: 'center' }}>
+              <div className="small" style={{ width: 64 }}>{name}</div>
+              <div className="progress" style={{ flex: 1 }}><div style={{ width: `${value ?? 0}%` }} /></div>
+              <div className="num small" style={{ width: 44, textAlign: 'right' }}>{value == null ? '—' : `${value}%`}</div>
+            </div>
+          ))}
+        </div>
+      )}
+    </Card>
+  )
+}
+
 export function formatValue(s: Sensor): React.ReactNode {
   if (s.value == null) return <span className="subtle">{s.reading}</span>
   const digits = s.unit === 'V' ? 2 : 0
@@ -70,6 +108,7 @@ export default function Sensors() {
           {report ? (
             <>
               {report.sensors.length} sensors · read {relativeTime(report.checked_at, now)}
+              {report.via === 'redfish' && ' · via Redfish, IPMI is not answering'}
               {paused ? ' · paused' : ' · refreshes every 10 s'}
               {report.stale && <span style={{ color: 'var(--warn)' }}> · the BMC missed the last poll; these are the last good readings</span>}
             </>
@@ -82,8 +121,10 @@ export default function Sensors() {
 
       {error && <Banner kind="error">Could not read sensors: {error}</Banner>}
 
+      <UtilisationCard report={report} />
+
       {report?.power && (
-        <Card title="Power draw (DCMI)">
+        <Card title={`Power draw (${POWER_SOURCE[report.power.source ?? ''] ?? 'BMC'})`}>
           <div className="readings">
             <div className="reading"><div className="reading-label">Now</div><div className="reading-value">{report.power.watts}<span className="sensor-unit">W</span></div></div>
             {report.power.average != null && <div className="reading"><div className="reading-label">Average</div><div className="reading-value">{report.power.average}<span className="sensor-unit">W</span></div></div>}
@@ -94,7 +135,7 @@ export default function Sensors() {
       )}
 
       {report && report.sensors.length === 0 && (
-        <Card><Empty>The BMC reports no sensors over IPMI. On a CIMC that usually means IPMI over LAN was just enabled; try again in a minute.</Empty></Card>
+        <Card><Empty>The BMC reports no sensors. On a CIMC that usually means IPMI over LAN was just enabled; try again in a minute.</Empty></Card>
       )}
 
       <div className="grid cols-2">

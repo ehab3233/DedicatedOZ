@@ -36,7 +36,12 @@ export function useKvmLauncher(serverId: string) {
       } else {
         win?.close()
         setJava(result.java)
-        toast.info('This firmware has no HTML5 viewer; use the Java launcher or the CIMC web UI.')
+        const probe = (result.probe ?? []).map((p) => `${p.path} → ${p.status ?? p.error ?? '?'}`).join(', ')
+        toast.info(
+          `CIMC ${result.firmware ?? ''} serves no HTML5 viewer at the paths the panel knows${probe ? ` (${probe})` : ''}. `
+          + 'Use the Java launcher, or open the CIMC, use its own Launch KVM → HTML based, copy the link its popup shows, '
+          + 'and set DOZ_KVM_URL_TEMPLATE to that link with {host}, {tkn1} and {tkn2} in place of the address and tokens.',
+        )
       }
     } catch (e) {
       win?.close()
