@@ -596,6 +596,29 @@ on the Network tab; the panel does not program the switch, so moving a
 server to another customer is: change the port's `pvid`, change the two
 fields, assign an address from the new block, reinstall.
 
+**Public addresses by static lease instead.** If you would rather not carry
+a private PXE subnet per VLAN, the DHCP server in the customer VLAN can hand
+each server its own public address, bound to its PXE MAC, with the same PXE
+options, and no dynamic pool at all. The installed OS still gets that
+address statically from the panel, so the lease and the assignment must
+agree; the lease is only used by the PXE ROM, the ramdisk and the OS
+installer, and by a manual install from an ISO, which then also comes up on
+the right address. For customer 1 on VLAN 1000 with `103.167.10.0/28`:
+
+```
+/interface vlan add name=vlan1000-cust1 interface=bridge vlan-id=1000
+/ip address add address=103.167.10.1/28 interface=vlan1000-cust1
+/ip dhcp-server add name=dhcp-cust1 interface=vlan1000-cust1 address-pool=static-only lease-time=1d
+/ip dhcp-server network add address=103.167.10.0/28 gateway=103.167.10.1 dns-server=1.1.1.1 \
+    next-server=203.0.113.5 boot-file-name=undionly.kpxe
+/ip dhcp-server lease add server=dhcp-cust1 address=103.167.10.10 mac-address=<the server's PXE MAC> comment="server 1"
+```
+
+`static-only` matters: a device a customer plugs in with an unknown MAC gets
+nothing, rather than one of your public addresses. In the panel the block is
+`103.167.10.0/28`, gateway `103.167.10.1`, VLAN `1000`, and the server's
+primary address is `103.167.10.10`; the PXE MAC is on its Hardware tab.
+
 **On the VM** nothing changes between customers. If you move the VM onto
 the services VLAN at this point, run
 `sudo /opt/doz-src/doz.sh update --iface <nic> --ip 203.0.113.5` once so the
