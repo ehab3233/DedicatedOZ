@@ -21,38 +21,64 @@ IPXE_REF="${IPXE_REF:-v2.0.0}"
 ALPINE_VERSION="${ALPINE_VERSION:-3.20}"
 URL=""
 OUT_DIR=""
+PRINT_EMBED=0
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --url) URL="${2%/}"; shift 2 ;;
         --out) OUT_DIR="$2"; shift 2 ;;
+        --print-embed) PRINT_EMBED=1; shift ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
 done
-[ -n "$URL" ] && [ -n "$OUT_DIR" ] || { echo "usage: $0 --url http://MGMT_IP --out DIR" >&2; exit 2; }
+[ -n "$URL" ] || { echo "usage: $0 --url http://MGMT_IP (--out DIR | --print-embed)" >&2; exit 2; }
 case "$URL" in http://*|https://*) ;; *) echo "--url must start with http:// or https://" >&2; exit 2 ;; esac
 
-mkdir -p "$OUT_DIR"
-WORK="$(mktemp -d "${TMPDIR:-/tmp}/doz-ipxe.XXXXXX")"
-trap 'rm -rf "$WORK"' EXIT
-
+# The script built into the loaders.
+#
 # ${netX/mac}: the interface dhcp just configured. With ipxe.efi every NIC
 # is a net device, and net0 is not necessarily the one with the cable.
-cat > "$WORK/embed.ipxe" <<EMBED
+#
+# `chain --replace` hands over to the control plane's script for good: when
+# that script ends, iPXE exits and the BIOS moves on to the next boot device.
+# A plain `chain` would come back here when the script ended and run on into
+# the retry loop below, asking the control plane again every five seconds.
+# The control plane's own scripts do any waiting that is needed (a server
+# with no OS parks at the boot loader and asks again), so this one only has
+# to fetch the first script.
+embed_script() {
+    cat <<EMBED
 #!ipxe
 echo DedicatedOZ network boot: ${URL}
 :dhcp
 dhcp || goto dhcp_retry
-chain ${URL}/boot/ipxe?mac=\${netX/mac} || goto unreachable
+chain --replace ${URL}/boot/ipxe?mac=\${netX/mac} || goto unreachable
 :dhcp_retry
 echo DHCP failed; retrying in 5 seconds
 sleep 5
 goto dhcp
 :unreachable
-echo Could not fetch ${URL}/boot/ipxe; booting the local disk in 10 seconds
-sleep 10
-sanboot --no-describe --drive 0x80 || exit
+echo Could not fetch ${URL}/boot/ipxe; booting the local disk
+sanboot --no-describe --drive 0x80 || goto nodisk
+exit
+:nodisk
+echo No bootable disk; asking the management server again in 30 seconds
+sleep 30
+goto dhcp
 EMBED
+}
+
+if [ "$PRINT_EMBED" -eq 1 ]; then
+    embed_script
+    exit 0
+fi
+[ -n "$OUT_DIR" ] || { echo "usage: $0 --url http://MGMT_IP --out DIR" >&2; exit 2; }
+
+mkdir -p "$OUT_DIR"
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/doz-ipxe.XXXXXX")"
+trap 'rm -rf "$WORK"' EXIT
+
+embed_script > "$WORK/embed.ipxe"
 
 SRC_MOUNT=()
 if [ -n "${IPXE_SRC:-}" ]; then

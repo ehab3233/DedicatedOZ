@@ -28,5 +28,7 @@ boot || goto failed
 
 :failed
 echo Failed to load the rescue image. Check ${doz-assets} from the boot VLAN.
-sleep 30
-shell
+echo Asking the management server again in 60 seconds.
+:retry
+sleep 60
+chain --replace {{ control_plane_url }}/boot/ipxe?mac={{ server.mac }}&waiting=1 || goto retry

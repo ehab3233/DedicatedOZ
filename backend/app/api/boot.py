@@ -44,31 +44,61 @@ from app.services.audit import record_audit
 
 router = APIRouter(prefix="/boot", tags=["boot"])
 
-#: Sent to any machine that PXE-boots without a job waiting for it. `sanboot`
-#: falls through to the next device rather than looping back into iPXE.
+# The scripts below never `reboot` and never chain into themselves. A loop is
+# always a `goto` within one script, and moving on is always `chain --replace`,
+# which swaps the running script for the next one instead of nesting them, so
+# a server can sit polling for hours without iPXE running out of stack. When a
+# script ends, iPXE exits and the BIOS tries the next boot device.
+
+#: Sent to a machine whose MAC is unusable. Nothing to do for it here.
 BOOT_LOCAL_SCRIPT = """#!ipxe
 echo No provisioning job for this host. Booting from local disk.
 sanboot --no-describe --drive 0x80 || exit
 """
 
-#: Sent to a server that PXE-boots while its install job is still preparing
-#: the disks (a box with no OS falls through to PXE on every boot, so this
-#: happens whenever the controller is being rebuilt). It asks again shortly.
+#: Sent to a known server with no job waiting for it. One with an OS boots
+#: it. One without (fresh from the rack, or wiped) would otherwise hand back
+#: to the BIOS, which PXE-boots it again, through a full POST every time;
+#: instead it parks at the boot loader and asks again every minute, so the
+#: console says what is going on and a job started later is picked up.
+BOOT_IDLE_SCRIPT = """#!ipxe
+echo No provisioning job for this host. Booting from local disk.
+sanboot --no-describe --drive 0x80 || goto nodisk
+exit
+:nodisk
+echo No bootable disk. Waiting here for a job; asking the management server every {idle} seconds.
+:wait
+sleep {idle}
+chain --replace {base}/boot/ipxe?mac={mac}&waiting=1 || goto wait
+"""
+
+#: Sent to a server that PXE-boots while its job is still preparing the disks.
+#: A box with no OS falls through to PXE on every boot, and the RAID step
+#: powers the host on, so this is the normal first boot of a reinstall. The
+#: server parks and polls; the control plane answers 503 until the boot script
+#: is ready, then hands it over, and the worker sees that and skips the power
+#: cycle it would otherwise do.
 BOOT_WAIT_SCRIPT = """#!ipxe
 echo The management server is still preparing the disks for this install.
-echo Asking again in 20 seconds.
-sleep 20
-chain {base}/boot/ipxe?mac={mac} || reboot
+echo Waiting here; asking again every {poll} seconds.
+:wait
+sleep {poll}
+chain --replace {base}/boot/ipxe?mac={mac}&waiting=1 || goto wait
 """
 
 #: Sent when the entry point is hit without a MAC. iPXE expands `${net0/mac}`
 #: itself when it runs this, so DHCP only ever has to hand out a fixed URL --
 #: no reliance on the DHCP server passing `${...}` through untouched.
 BOOT_CHAIN_SCRIPT = """#!ipxe
-chain {base}/boot/ipxe?mac=${{net0/mac}} || goto local
+chain --replace {base}/boot/ipxe?mac=${{net0/mac}} || goto local
 :local
 sanboot --no-describe --drive 0x80 || exit
 """
+
+#: What a parked server's poll gets while there is nothing new for it. iPXE
+#: treats the error status as a failed `chain`, so the script's `goto wait`
+#: runs and it asks again.
+NOT_READY_RESPONSE = "nothing to boot yet; ask again\n"
 
 
 def _resolve(db: Session, mac: str, request: Request, *, signature: str | None = None):
@@ -99,6 +129,10 @@ def _pin_client(db: Session, job: Job, request: Request) -> None:
     pinned = payload.get("_boot_client_ip")
 
     if pinned is None:
+        if source is None:
+            # Nothing to pin to (a proxy that strips the address, or the test
+            # client). Logging "checked in from None" on every poll helps no one.
+            return
         payload["_boot_client_ip"] = source
         job.payload = payload
         db.add(job)
@@ -126,15 +160,20 @@ def _pin_client(db: Session, job: Job, request: Request) -> None:
 def ipxe_entry(
     request: Request,
     mac: str = "",
+    waiting: bool = False,
     db: Session = Depends(get_db),
 ) -> PlainTextResponse:
     """Entry point. DHCP option 67 points every machine here.
 
     Called as `/boot/ipxe?mac=${net0/mac}` — iPXE substitutes the MAC itself,
     so one DHCP option serves the whole fleet.
+
+    `waiting=1` marks a poll from a server parked at the boot loader by one of
+    the scripts above. It gets 503 while there is nothing new for it, which
+    keeps its loop going, and the real script the moment there is.
     """
+    base = settings.control_plane_url.rstrip("/")
     if not mac:
-        base = settings.control_plane_url.rstrip("/")
         return PlainTextResponse(BOOT_CHAIN_SCRIPT.format(base=base), media_type="text/plain")
 
     try:
@@ -142,32 +181,59 @@ def ipxe_entry(
     except ValueError:
         return PlainTextResponse(BOOT_LOCAL_SCRIPT, media_type="text/plain")
 
+    idle = BOOT_IDLE_SCRIPT.format(
+        base=base, mac=normalised, idle=settings.boot_idle_poll_seconds
+    )
     try:
         server, job = boot_service.find_provisioning_job(db, normalised)
     except boot_service.NoActiveInstall:
         # Not an error: this is the normal path for every reboot of every
-        # server that is not currently being provisioned.
-        return PlainTextResponse(BOOT_LOCAL_SCRIPT, media_type="text/plain")
+        # server that is not being provisioned, and for a parked server whose
+        # job has ended (it boots its disk if it has one).
+        return PlainTextResponse(idle, media_type="text/plain")
 
     _pin_client(db, job, request)
-    payload = job.payload or {}
-    if not payload.get("_netboot_ready") and not (job.result or {}).get("_handoff"):
-        # The worker has not set the boot flag yet: the disks may be mid-rebuild.
+    result = job.result or {}
+    if result.get("_installer_status"):
+        # The installer has already reported in and the worker is closing the
+        # job. Serving the installer again now would reinstall on every
+        # reboot until it had.
         job_service.log(
-            db, job, "server PXE-booted before the disks were ready; told it to wait",
-            level="warning",
+            db, job, "server PXE-booted after the installer reported in; told it to "
+            "boot from disk",
         )
         db.commit()
-        base = settings.control_plane_url.rstrip("/")
+        return PlainTextResponse(idle, media_type="text/plain")
+
+    if not (job.payload or {}).get("_netboot_ready") and not result.get("_handoff"):
+        # The worker has not set the boot flag yet: the disks may be
+        # mid-rebuild. Park the server; the stage tells the worker it is here.
+        if waiting and job.stage == boot_service.STAGE_PARKED:
+            return PlainTextResponse(
+                NOT_READY_RESPONSE, status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                media_type="text/plain",
+            )
+        # First contact for this job, whether a fresh PXE boot or a poll from
+        # a server that was parked with no job (that loop asks once a minute;
+        # this script asks every 20 s, and replaces it).
+        if job.stage != boot_service.STAGE_PARKED:
+            job_service.set_stage(db, job, boot_service.STAGE_PARKED)
+            db.commit()
         return PlainTextResponse(
-            BOOT_WAIT_SCRIPT.format(base=base, mac=normalised), media_type="text/plain"
+            BOOT_WAIT_SCRIPT.format(base=base, mac=normalised, poll=settings.boot_poll_seconds),
+            media_type="text/plain",
         )
+
     script = boot_service.render_ipxe_script(db, server, job)
-    if job.type == JobType.INSTALL.value and (job.result or {}).get("_handoff"):
-        job_service.set_stage(db, job, "loading the OS installer", progress=55)
+    if job.type == JobType.INSTALL.value and result.get("_handoff"):
+        stage, progress = "loading the OS installer", 55
     else:
-        job_service.set_stage(db, job, "installer fetched boot script", progress=20)
-    db.commit()
+        stage, progress = boot_service.STAGE_SCRIPT_FETCHED, 20
+    # A script that could not load what it points at asks again every minute;
+    # the stage is only worth recording once.
+    if job.stage != stage:
+        job_service.set_stage(db, job, stage, progress=progress)
+        db.commit()
     return PlainTextResponse(script, media_type="text/plain")
 
 

@@ -341,7 +341,7 @@ class TestBootEntry:
     def test_bare_entry_hands_out_a_chain_script(self, client):
         response = client.get("/boot/ipxe")
         assert response.status_code == 200
-        assert "chain http://10.10.0.5:8000/boot/ipxe?mac=${net0/mac}" in response.text
+        assert "chain --replace http://10.10.0.5:8000/boot/ipxe?mac=${net0/mac}" in response.text
 
     def test_nocloud_seed_serves_user_and_meta_data(
         self, client, db, make_customer, make_server, make_subscription, make_template,

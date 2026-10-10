@@ -133,6 +133,14 @@ class Settings(BaseSettings):
     # client-id (dnsmasq: `dhcp-ignore-clid`). Turn off when using someone
     # else's DHCP in proxy mode, or the OS installer may be refused mid-install.
     boot_pin_client_ip: bool = True
+    # A server that PXE-boots while its job is still preparing the disks parks
+    # at the boot loader and asks for its script again this often.
+    boot_poll_seconds: int = 20
+    # A server with no job and no bootable disk parks too, and asks this often.
+    boot_idle_poll_seconds: int = 60
+    # How long the worker gives a parked server to fetch its boot script by
+    # itself before power cycling it anyway (longer than two polls).
+    boot_park_window_seconds: int = 55
 
     # --- console -----------------------------------------------------------
     ipmitool_path: str = "ipmitool"

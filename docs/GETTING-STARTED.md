@@ -409,7 +409,9 @@ reach that address.
 With no job waiting, a reset also shows the netboot rail at work on the
 console: PXE fires, iPXE chains to the management server, gets "No
 provisioning job for this host. Booting from local disk", and falls through to
-whatever is on disk.
+whatever is on disk. A server with nothing on disk stays at the boot loader
+("No bootable disk. Waiting here for a job") and asks the management server
+again every minute, rather than going round through POST and PXE forever.
 
 That fall-through is the whole architecture working end to end: DHCP, TFTP,
 iPXE, the control plane, and the BMC. If it does not happen, nothing else
@@ -433,11 +435,12 @@ What you should see, in order, over about fifteen to twenty minutes:
 
 | Stage | Where it shows | If it stalls here |
 |---|---|---|
+| building raid1 through the BMC | 3% | The BMC could not build the array: the job log shows what the CIMC said. Hardware tab → Configure RAID runs the same step on its own. The host is powered on for this; with nothing on disk it PXE-boots meanwhile and the job notes it as *parked at the boot loader until the disks are ready* — that is normal, the server waits there |
 | setting one-time PXE boot | job log | Redfish rejected the boot override — bench test 2 |
+| waiting for the parked boot loader to fetch the script | job log | Only when the server was parked: it is given a minute to pick the script up itself, which saves a POST. If it does not, the job power cycles as below |
 | power cycling into installer | job log | BMC did not power the box — check the raw log |
 | installer fetched boot script | job log, 20% | Never arrives → DHCP/TFTP/iPXE. `journalctl -u dnsmasq`, serial console |
 | installer booted | ramdisk callback, 25% | Ramdisk loaded but cannot reach `http://10.0.0.5` — is the data NIC on the same network as the VM? |
-| building raid1 through the BMC | 3% | The BMC could not build the array: the job log shows what the CIMC said. Hardware tab → Configure RAID runs the same step on its own |
 | preparing storage | 25–45% | The ramdisk wipes the array the BMC built (no StorCLI needed) |
 | rebooting into the OS installer | 50% | The ramdisk has prepared the disks and reboots; the next PXE boot loads Ubuntu's own installer. If the box comes back into the ramdisk instead, the one-time PXE flag was not set (job log) |
 | the OS installer boots | serial and KVM | Ubuntu's installer runs with the answer file; its own messages show on the console from here |

@@ -27,5 +27,7 @@ boot || goto failed
 echo
 echo Failed to load the {{ os.name }} installer from {{ os.kernel_url }}.
 echo Check that it is on the management server (Images page, Netboot images).
-echo Dropping to a shell in 30 seconds so this stays visible on the console.
-sleep 30
+echo Asking the management server again in 60 seconds.
+:retry
+sleep 60
+chain --replace {{ control_plane_url }}/boot/ipxe?mac={{ server.mac }}&waiting=1 || goto retry

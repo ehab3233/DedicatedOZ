@@ -61,6 +61,13 @@ class NoActiveInstall(LookupError):
     pass
 
 
+#: Job stages the boot rail sets and the worker reads back. A server that
+#: PXE-boots before its script is ready is parked at the boot loader, polling;
+#: the worker then lets it fetch the script itself instead of power cycling.
+STAGE_PARKED = "parked at the boot loader until the disks are ready"
+STAGE_SCRIPT_FETCHED = "installer fetched boot script"
+
+
 def find_provisioning_job(db: Session, mac: str) -> tuple[Server, Job]:
     """Resolve a MAC to the server and its in-flight install/rescue/wipe job."""
     server = db.execute(

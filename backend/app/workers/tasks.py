@@ -26,6 +26,7 @@ from app.drivers.redfish import RedfishDriver
 from app.enums import ActorType, JobState, JobType, PowerAction, RaidLevel, ServerState
 from app.models import Image, Job, OSTemplate, Server
 from app.secrets import SecretNotFoundError
+from app.services import boot as boot_service
 from app.services import boot_assets, images, raid
 from app.services import jobs as job_service
 from app.services.dispatch import enqueue
@@ -665,6 +666,13 @@ def _netboot_into_ramdisk(db: Session, job: Job, server: Server, driver) -> None
             "and sudo /opt/doz/doz.sh ramdisk (the Images page lists what is missing)"
         )
 
+    # A server that PXE-booted during the disk work (one with no OS does, on
+    # every boot) is parked at the boot loader, polling for this script. Note
+    # that before the stage is overwritten below.
+    db.commit()
+    db.refresh(job)
+    parked = job.stage == boot_service.STAGE_PARKED
+
     # From here a PXE boot gets the real boot script; before this it is told
     # to wait, because the disks may still be being rebuilt.
     job.payload = {**(job.payload or {}), "_netboot_ready": True}
@@ -673,12 +681,52 @@ def _netboot_into_ramdisk(db: Session, job: Job, server: Server, driver) -> None
     db.commit()
     driver.set_boot_once("pxe")
 
+    if parked and _parked_server_fetched_script(db, job):
+        # It has the script and is loading the ramdisk: a power cycle now
+        # would only add another POST, which is minutes on this hardware.
+        job_service.log(
+            db, job, "the server was waiting at the boot loader and has fetched the "
+            "boot script; no power cycle needed", customer_visible=True,
+        )
+        # Progress stays at the fetch (20) rather than dropping back to 15.
+        job_service.set_stage(db, job, "waiting for installer to check in")
+        db.commit()
+        return
+
     job_service.set_stage(db, job, "power cycling into installer", progress=10)
     db.commit()
     driver.power_cycle()
 
     job_service.set_stage(db, job, "waiting for installer to check in", progress=15)
     db.commit()
+
+
+def _parked_server_fetched_script(db: Session, job: Job) -> bool:
+    """Give a server parked at the boot loader time to poll once more.
+
+    The boot rail records the fetch on the job row; if it does not come within
+    the window (the server was reset or powered off meanwhile) the caller
+    power cycles as it always did.
+    """
+    # The fetch shows as progress 20 (and its stage). Only the stage is
+    # written here, so a fetch that lands between the read and the write
+    # below still shows in the progress.
+    job_service.set_stage(db, job, "waiting for the parked boot loader to fetch the script")
+    db.commit()
+    deadline = time.monotonic() + settings.boot_park_window_seconds
+    while True:
+        db.commit()
+        db.refresh(job)
+        if job.progress >= 20 or job.stage == boot_service.STAGE_SCRIPT_FETCHED:
+            return True
+        if job.cancel_requested or time.monotonic() >= deadline:
+            break
+        time.sleep(1)
+    job_service.log(
+        db, job, "the parked server did not ask for the boot script again; power cycling",
+        level="warning",
+    )
+    return False
 
 
 def _wait_for_callback(db: Session, job: Job, timeout: int) -> dict:

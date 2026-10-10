@@ -41,24 +41,201 @@ def install_job(db, make_customer, make_server, make_subscription, make_template
     return server, job, customer
 
 
-class TestNotReadyYet:
-    def test_a_boot_before_the_worker_is_ready_is_told_to_wait(self, client, db, install_job):
-        # A server with no OS falls through to PXE on every boot, so it can
-        # turn up while the controller is still being rebuilt.
+class TestParkedBootLoader:
+    """A server that PXE-boots before its script is ready parks at the boot
+    loader and polls. No script here ever reboots or chains into itself: a
+    loop is a `goto` within one script, and moving on is `chain --replace`."""
+
+    def _park(self, client, db, install_job):
         server, job, _ = install_job
         job.payload = {k: v for k, v in job.payload.items() if k != "_netboot_ready"}
         db.commit()
         script = client.get("/boot/ipxe", params={"mac": server.provisioning_mac}).text
+        return server, job, script
+
+    def test_a_boot_before_the_worker_is_ready_is_parked(self, client, db, install_job):
+        # A server with no OS falls through to PXE on every boot, and the RAID
+        # step powers the host on, so this is the normal first boot.
+        server, job, script = self._park(client, db, install_job)
         assert "still preparing the disks" in script
-        assert "chain http://" in script and f"/boot/ipxe?mac={server.provisioning_mac}" in script
-        assert "doz-installer" not in script
+        assert (
+            f"chain --replace http://10.10.0.5:8000/boot/ipxe?mac={server.provisioning_mac}"
+            "&waiting=1 || goto wait"
+        ) in script
+        assert "reboot" not in script and "doz-installer" not in script
         db.refresh(job)
+        assert job.stage == boot_service.STAGE_PARKED
         assert job.progress == 0  # not "installer fetched boot script"
+
+    def test_polls_get_503_until_the_script_is_ready(self, client, db, install_job):
+        server, job, _ = self._park(client, db, install_job)
+        db.refresh(job)
+        logged = len(job.log_entries)
+        for _ in range(2):
+            response = client.get(
+                "/boot/ipxe", params={"mac": server.provisioning_mac, "waiting": 1}
+            )
+            assert response.status_code == 503
+            assert "ask again" in response.text
+        db.refresh(job)
+        # A poll every 20 s must not spam the log.
+        assert len(job.log_entries) == logged, [e.message for e in job.log_entries]
+        assert job.stage == boot_service.STAGE_PARKED
 
         job.payload = {**job.payload, "_netboot_ready": True}
         db.commit()
+        response = client.get(
+            "/boot/ipxe", params={"mac": server.provisioning_mac, "waiting": 1}
+        )
+        assert response.status_code == 200 and "doz-installer" in response.text
+        db.refresh(job)
+        assert job.stage == boot_service.STAGE_SCRIPT_FETCHED and job.progress == 20
+
+        # A script that could not load its image asks again every minute; the
+        # stage is recorded once.
+        logged = len(job.log_entries)
+        assert client.get(
+            "/boot/ipxe", params={"mac": server.provisioning_mac, "waiting": 1}
+        ).status_code == 200
+        db.refresh(job)
+        assert len(job.log_entries) == logged
+
+    def test_a_server_with_no_job_boots_its_disk_or_parks(self, client, db, make_server):
+        server = make_server()
+        for params in ({}, {"waiting": 1}):
+            response = client.get(
+                "/boot/ipxe", params={"mac": server.provisioning_mac, **params}
+            )
+            # 200 even to a poll: a parked server whose job was cancelled must
+            # try its disk, not poll forever.
+            assert response.status_code == 200
+            lines = response.text.splitlines()
+            disk = next(i for i, line in enumerate(lines) if line.startswith("sanboot"))
+            poll = next(i for i, line in enumerate(lines) if line.startswith("chain"))
+            assert disk < poll
+            assert "sanboot --no-describe --drive 0x80 || goto nodisk" in response.text
+            assert (
+                f"chain --replace http://10.10.0.5:8000/boot/ipxe?mac={server.provisioning_mac}"
+                "&waiting=1 || goto wait"
+            ) in response.text
+            assert "reboot" not in response.text and "doz-installer" not in response.text
+
+    def test_once_the_installer_has_reported_in_the_server_boots_its_disk(
+        self, client, db, install_job
+    ):
+        # The installer posts completion then reboots; the worker closes the
+        # job moments later. A PXE boot in between must not reinstall.
+        server, job, _ = install_job
+        job.result = {**(job.result or {}), "_installer_status": "succeeded"}
+        db.commit()
         script = client.get("/boot/ipxe", params={"mac": server.provisioning_mac}).text
-        assert "doz-installer" in script
+        assert "doz-installer" not in script and "sanboot" in script
+        db.refresh(job)
+        assert "boot from disk" in job.log_entries[-1].message
+
+    def test_the_mac_less_entry_point_hands_over_rather_than_nesting(self, client):
+        script = client.get("/boot/ipxe").text
+        assert "chain --replace http://10.10.0.5:8000/boot/ipxe?mac=${net0/mac}" in script
+
+
+class TestParkedServerSkipsThePowerCycle:
+    """The worker lets a server that is already polling at the boot loader
+    fetch the script itself. A POST on this class of hardware is minutes."""
+
+    @pytest.fixture
+    def quick(self, monkeypatch):
+        from app.config import settings
+        from app.workers import tasks
+
+        monkeypatch.setattr(settings, "boot_park_window_seconds", 2)
+        monkeypatch.setattr(tasks.boot_assets, "missing_for", lambda template: [])
+
+    def _parked(self, client, db, install_job):
+        server, job, _ = install_job
+        job.payload = {k: v for k, v in job.payload.items() if k != "_netboot_ready"}
+        db.commit()
+        # The server was parked with no job (polling once a minute) when the
+        # install started: its first poll gets the faster wait script, the
+        # next the 503 that keeps that script looping.
+        response = client.get(
+            "/boot/ipxe", params={"mac": server.provisioning_mac, "waiting": 1}
+        )
+        assert response.status_code == 200 and "still preparing the disks" in response.text
+        response = client.get(
+            "/boot/ipxe", params={"mac": server.provisioning_mac, "waiting": 1}
+        )
+        assert response.status_code == 503
+        db.refresh(job)
+        assert job.stage == boot_service.STAGE_PARKED
+        return server, job
+
+    def test_no_power_cycle_when_the_parked_server_fetches_the_script(
+        self, client, db, install_job, quick
+    ):
+        from app.workers.tasks import _netboot_into_ramdisk
+
+        server, job = self._parked(client, db, install_job)
+        calls: list[str] = []
+
+        class Driver:
+            def set_boot_once(self, target):  # noqa: ANN001
+                calls.append(f"boot {target}")
+                # The parked server polls again while the worker is at the BMC.
+                response = client.get(
+                    "/boot/ipxe", params={"mac": server.provisioning_mac, "waiting": 1}
+                )
+                assert response.status_code == 200 and "doz-installer" in response.text
+
+            def power_cycle(self):
+                calls.append("cycle")
+
+        _netboot_into_ramdisk(db, job, server, Driver())
+        assert calls == ["boot pxe"]
+        db.refresh(job)
+        assert job.stage == "waiting for installer to check in"
+        assert any("no power cycle needed" in e.message for e in job.log_entries)
+
+    def test_power_cycles_when_the_parked_server_goes_quiet(
+        self, client, db, install_job, quick
+    ):
+        from app.workers.tasks import _netboot_into_ramdisk
+
+        server, job = self._parked(client, db, install_job)
+        calls: list[str] = []
+
+        class Driver:
+            def set_boot_once(self, target):  # noqa: ANN001
+                calls.append(f"boot {target}")
+
+            def power_cycle(self):
+                calls.append("cycle")
+
+        _netboot_into_ramdisk(db, job, server, Driver())
+        assert calls == ["boot pxe", "cycle"]
+        db.refresh(job)
+        assert any("did not ask for the boot script again" in e.message for e in job.log_entries)
+
+    def test_a_server_that_was_not_parked_is_power_cycled_at_once(
+        self, db, install_job, quick
+    ):
+        import time
+
+        from app.workers.tasks import _netboot_into_ramdisk
+
+        server, job, _ = install_job
+        calls: list[str] = []
+
+        class Driver:
+            def set_boot_once(self, target):  # noqa: ANN001
+                calls.append(f"boot {target}")
+
+            def power_cycle(self):
+                calls.append("cycle")
+
+        started = time.monotonic()
+        _netboot_into_ramdisk(db, job, server, Driver())
+        assert calls == ["boot pxe", "cycle"]
+        assert time.monotonic() - started < 1
 
 
 class TestBootScriptRendering:
@@ -72,6 +249,21 @@ class TestBootScriptRendering:
         assert "doz_mode=install" in script
         # Serial console output is what makes a failed install debuggable.
         assert "console=ttyS0,115200n8" in script
+
+    def test_a_script_that_cannot_load_its_image_asks_again(self, db, install_job):
+        server, job, _ = install_job
+        for result in ({}, {"_handoff": True}):
+            job.result = result
+            db.commit()
+            script = boot_service.render_ipxe_script(db, server, job)
+            commands = [
+                line.split()[0] for line in script.splitlines() if line.strip() and line[0] != "#"
+            ]
+            assert "shell" not in commands and "reboot" not in commands
+            assert (
+                f"chain --replace http://10.10.0.5:8000/boot/ipxe?mac={server.provisioning_mac}"
+                "&waiting=1 || goto retry"
+            ) in script
 
     def test_rescue_script_uses_the_rescue_mode(self, db, make_customer, make_server,
                                                 make_subscription, make_ssh_key):
@@ -87,6 +279,10 @@ class TestBootScriptRendering:
         script = boot_service.render_ipxe_script(db, server, job)
         assert "doz_mode=rescue" in script
         assert "Disks will NOT be modified" in script
+        commands = [
+            line.split()[0] for line in script.splitlines() if line.strip() and line[0] != "#"
+        ]
+        assert "shell" not in commands and "&waiting=1 || goto retry" in script
 
     def test_answer_file_contains_the_customers_keys(self, db, install_job):
         server, job, _ = install_job

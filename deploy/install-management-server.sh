@@ -569,10 +569,12 @@ if [ "$PXE_MODE" != "none" ]; then
     # filename again and, on a DHCP server that cannot tell it from the PXE
     # ROM (MikroTik, most routers), loops on undionly.kpxe. Built from
     # source in docker, so only when docker is here; doz.sh ramdisk and
-    # doz.sh ipxe build them otherwise. Rebuilt when the address changes.
+    # doz.sh ipxe build them otherwise. Rebuilt when the address changes or
+    # the script built into them does.
     WANT_URL="http://${MGMT_IP}"
-    HAVE_URL="$(cat "$TFTP/.embedded-url" 2>/dev/null || true)"
-    if [ "$HAVE_URL" != "$WANT_URL" ]; then
+    WANT_EMBED="$(bash "$INSTALL_DIR/installer/build-ipxe.sh" --url "$WANT_URL" --print-embed 2>/dev/null || true)"
+    HAVE_EMBED="$(cat "$TFTP/.embedded.ipxe" 2>/dev/null || true)"
+    if [ "$HAVE_EMBED" != "$WANT_EMBED" ]; then
         if command -v docker >/dev/null 2>&1; then
             note "building iPXE loaders that chain to $WANT_URL (a few minutes)"
             bash "$INSTALL_DIR/installer/build-ipxe.sh" --url "$WANT_URL" --out "$TFTP" >/dev/null 2>&1 \
