@@ -484,15 +484,123 @@ sale.
 The move, when you make it, is the three planes from the spec:
 
 1. Put the CIMC ports on their own VLAN (or a cheap separate 1G switch) with no
-   route to anywhere except the management VM's second NIC.
-2. Put the PXE/provisioning traffic on a second VLAN, and move dnsmasq to it.
+   route to anywhere except the management VM.
+2. Put the management VM on a services VLAN that every customer VLAN can reach
+   on the three PXE ports and nothing else.
 3. Customer data ports on per-customer VLANs with the public block.
 
-Nothing in the software changes. `DOZ_CONTROL_PLANE_URL` becomes the VM's
-address on the provisioning VLAN, `cimc_ip` values become OOB-VLAN addresses,
+Nothing in the software changes. `cimc_ip` values become OOB-VLAN addresses
 and the IP blocks become public space. The job workers are already the only
 thing that talks to a BMC, which is what makes the separation a config change
-rather than a rewrite.
+rather than a rewrite. The rest of this section is that config.
+
+### Per-customer VLANs on a MikroTik (RouterOS 7)
+
+**How a server is wired.** Its data port is an access port in the customer's
+VLAN: untagged to the server, so the installed OS has no VLAN configuration
+at all (the installer writes a plain static address, and does not tag). The
+gateway for the customer's public addresses is the router's address on that
+VLAN. The CIMC port is an access port in the CIMC VLAN.
+
+**How PXE works inside a customer VLAN.** The server's PXE ROM asks for DHCP
+in its own VLAN, so each customer VLAN has a small DHCP server on the router
+whose only job is the install: it hands out a private address for the few
+minutes the ramdisk and the OS installer run, with `next-server` pointing at
+the management VM. The installed OS never uses DHCP; it comes up on the
+public address the panel assigned. The ramdisk and the installer reach the
+VM through the router, which is why the VM must be reachable from every
+customer VLAN on UDP 69 and TCP 80 and 8080, and nothing else.
+
+**The example below** uses: VLAN 10 for the management VM (`203.0.113.5`),
+VLAN 20 for the CIMCs (`10.20.0.0/24`), and VLAN 101 for customer 1 with the
+public block `203.0.113.8/29` (router `.9`, first server `.10`) and
+`10.101.0.0/24` for PXE leases. Add a VLAN per customer the same way, with
+the next /29 and the next 10.1xx.0.0/24. `ether1` is the uplink, `ether2` the
+VM host, `ether3` customer 1's server data port, `ether5` the CIMC ports (or
+a separate switch). Replace the addresses with your own.
+
+```
+# VLAN-aware bridge; keep filtering off until the VLAN table is complete.
+/interface bridge add name=bridge vlan-filtering=no
+/interface bridge port add bridge=bridge interface=ether2 pvid=10 frame-types=admit-only-untagged-and-priority-tagged
+/interface bridge port add bridge=bridge interface=ether3 pvid=101 frame-types=admit-only-untagged-and-priority-tagged
+/interface bridge port add bridge=bridge interface=ether5 pvid=20 frame-types=admit-only-untagged-and-priority-tagged
+/interface bridge vlan add bridge=bridge vlan-ids=10 tagged=bridge untagged=ether2
+/interface bridge vlan add bridge=bridge vlan-ids=20 tagged=bridge untagged=ether5
+/interface bridge vlan add bridge=bridge vlan-ids=101 tagged=bridge untagged=ether3
+
+# The router's leg in each VLAN.
+/interface vlan add name=vlan10-mgmt interface=bridge vlan-id=10
+/interface vlan add name=vlan20-cimc interface=bridge vlan-id=20
+/interface vlan add name=vlan101-cust1 interface=bridge vlan-id=101
+/ip address add address=203.0.113.1/29 interface=vlan10-mgmt
+/ip address add address=10.20.0.1/24 interface=vlan20-cimc
+/ip address add address=203.0.113.9/29 interface=vlan101-cust1
+/ip address add address=10.101.0.1/24 interface=vlan101-cust1
+
+# PXE-only DHCP in the customer VLAN: a private lease for the install, with
+# the PXE options pointing at the VM.
+/ip pool add name=pxe-cust1 ranges=10.101.0.100-10.101.0.199
+/ip dhcp-server add name=dhcp-cust1 interface=vlan101-cust1 address-pool=pxe-cust1 lease-time=30m
+/ip dhcp-server network add address=10.101.0.0/24 gateway=10.101.0.1 dns-server=10.101.0.1 \
+    next-server=203.0.113.5 boot-file-name=undionly.kpxe
+
+/interface list add name=customers
+/interface list member add list=customers interface=vlan101-cust1
+
+# What may cross between VLANs. Order matters; put these above any
+# catch-all accept in your forward chain.
+/ip firewall filter
+add chain=forward connection-state=established,related action=accept
+add chain=forward in-interface-list=customers out-interface-list=customers action=drop \
+    comment="customers never see each other"
+add chain=forward in-interface-list=customers out-interface=vlan20-cimc action=drop \
+    comment="customers never reach a CIMC"
+add chain=forward in-interface-list=customers dst-address=203.0.113.5 protocol=udp dst-port=69 action=accept \
+    comment="PXE: the loaders"
+add chain=forward in-interface-list=customers dst-address=203.0.113.5 protocol=tcp dst-port=80,8080 action=accept \
+    comment="PXE: boot scripts, callbacks, ramdisk, images"
+add chain=forward in-interface-list=customers dst-address=203.0.113.5 action=drop \
+    comment="nothing else on the VM from a customer VLAN"
+add chain=forward src-address=203.0.113.5 out-interface=vlan20-cimc protocol=udp dst-port=623 action=accept \
+    comment="VM -> CIMCs: IPMI, SOL"
+add chain=forward src-address=203.0.113.5 out-interface=vlan20-cimc protocol=tcp dst-port=443 action=accept \
+    comment="VM -> CIMCs: Redfish, XML API, KVM tokens"
+add chain=forward in-interface=vlan20-cimc dst-address=203.0.113.5 protocol=tcp dst-port=8080 action=accept \
+    comment="a CIMC fetching an ISO for virtual media"
+add chain=forward out-interface=vlan20-cimc action=drop \
+    comment="CIMCs: only the VM (add your VPN above this line: tcp 443,2068 for the KVM)"
+
+# Last: switch the VLAN table on.
+/interface bridge set bridge vlan-filtering=yes
+```
+
+The router's own `input` chain must accept DHCP (UDP 67) from the customer
+VLANs for the PXE lease; the default MikroTik firewall does for interfaces
+in its LAN list, so add each customer VLAN to that list or add the rule.
+Customers' public addresses are routed, not NATed; make sure no `srcnat`
+masquerade rule matches them.
+
+**In the panel, per customer:**
+
+1. **Manage → IP space → Add block:** `203.0.113.8/29`, gateway
+   `203.0.113.9`, VLAN `101`, bridged.
+2. **Server → Edit:** Customer VLAN `101`, and the switch port, so the
+   record says where the cable goes.
+3. **Server → Assign address:** `203.0.113.10` from that block, Primary.
+4. **Reinstall.** The ramdisk takes a `10.101.0.x` lease, installs, and the
+   OS comes up on `203.0.113.10/29` via `203.0.113.9`.
+
+The VLAN numbers on the block and the server are recorded for you and shown
+on the Network tab; the panel does not program the switch, so moving a
+server to another customer is: change the port's `pvid`, change the two
+fields, assign an address from the new block, reinstall.
+
+**On the VM** nothing changes between customers. If you move the VM onto
+the services VLAN at this point, run
+`sudo /opt/doz-src/doz.sh update --iface <nic> --ip 203.0.113.5` once so the
+loaders and callbacks carry that address, and set each server's CIMC
+address in the panel to its VLAN 20 address.
 
 ## Things that are still manual
 
