@@ -457,6 +457,75 @@ class TestRaidOverXmlApiExistingArray:
         assert clear < delete
 
 
+class TestRaidNeedsTheHostOn:
+    def test_a_powered_off_host_is_powered_on_and_the_controller_waited_for(self, monkeypatch):
+        from app.services import raid
+
+        monkeypatch.setattr(raid.time, "sleep", lambda s: None)
+        calls: list[str] = []
+        states = iter([
+            [{"name": "MRAID", "model": "", "raid_types": [], "state": "Disabled"}],
+            [{"name": "MRAID", "model": "", "raid_types": [], "state": "Enabled"}],
+        ])
+
+        class Redfish:
+            def power_status(self):
+                return type("P", (), {"state": "off"})()
+
+            def power(self, action):  # noqa: ANN001
+                calls.append(f"power {action.value}")
+
+            def storage(self):
+                calls.append("storage")
+                return next(states)
+
+        logged: list[str] = []
+        raid.ensure_host_on(Redfish(), lambda m, level="info", **kw: logged.append(m))
+        assert calls == ["power on", "storage", "storage"]
+        assert any("RAID controller is up" in m for m in logged)
+
+    def test_a_host_that_is_on_is_left_alone(self):
+        from app.services import raid
+
+        class Redfish:
+            def power_status(self):
+                return type("P", (), {"state": "on"})()
+
+            def power(self, action):  # noqa: ANN001
+                raise AssertionError("must not touch power")
+
+        raid.ensure_host_on(Redfish(), lambda m, level="info", **kw: None)
+
+    def test_not_ready_answers_are_retried_until_the_controller_is_up(self, monkeypatch):
+        # "Operation failed. storage subsystem not ready yet (CIMC error 2003)"
+        # right after power-on, while the controller is still initialising.
+        from app.services import raid
+
+        monkeypatch.setattr(raid.time, "sleep", lambda s: None)
+        answers = iter([
+            BMCError("configConfMo x: Operation failed. storage subsystem not ready yet "
+                     "(CIMC error 2003)"),
+            BMCError("configConfMo x: Operation failed. storage subsystem not ready yet "
+                     "(CIMC error 2003)"),
+            {"ok": "yes"},
+        ])
+
+        def attempt():
+            answer = next(answers)
+            if isinstance(answer, Exception):
+                raise answer
+            return answer
+
+        assert raid._until_ready(attempt, log=lambda m, level="info", **kw: None,
+                                 what="x") == {"ok": "yes"}
+
+        def other_error():
+            raise BMCError("configConfMo x: Invalid request (CIMC error 2999)")
+
+        with pytest.raises(BMCError, match="2999"):
+            raid._until_ready(other_error, log=lambda m, level="info", **kw: None, what="x")
+
+
 class TestRaidPlanning:
     def _drive(self, name, cap, media="HDD", **extra):
         return {"name": name, "path": f"/d/{name}", "capacity_bytes": cap, "media": media,

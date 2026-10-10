@@ -21,7 +21,7 @@ from app.drivers.base import BMCError, LogSink, null_sink
 from app.drivers.cimc import CimcXmlApi
 from app.drivers.factory import credential_for
 from app.drivers.redfish import RedfishDriver
-from app.enums import RaidLevel
+from app.enums import PowerAction, RaidLevel
 from app.models import Server
 
 VOLUME_NAME = "doz"
@@ -150,6 +150,59 @@ def describe(level: RaidLevel, drives: list[dict], capacity_bytes: int | None) -
     return f"{level.value.upper()} over {len(drives)} drives ({names}){size}"
 
 
+def _is_raid_controller(c: dict) -> bool:
+    name = " ".join(filter(None, [c.get("name"), c.get("model")]))
+    return bool(c.get("raid_types")) or bool(_RAID.search(name) and not _NOT_RAID.search(name))
+
+
+def ensure_host_on(redfish: RedfishDriver, log: LogSink) -> None:
+    """Power the host on if it is off, and wait for the RAID controller.
+
+    The controller is a PCIe card: it only runs while the host has power.
+    With the host off the CIMC lists it as Disabled and answers every
+    storage write with "storage subsystem not ready yet".
+    """
+    try:
+        state = redfish.power_status().state
+    except BMCError as exc:
+        log(f"could not read the power state ({exc}); carrying on", level="warning")
+        return
+    if state == "on":
+        return
+    log("the host is powered off and the RAID controller only runs while it is on; "
+        "powering on (a PXE boot during this is told to wait)")
+    redfish.power(PowerAction.ON)
+    deadline = time.monotonic() + settings.raid_bmc_timeout_seconds
+    while time.monotonic() < deadline:
+        time.sleep(10)
+        try:
+            controllers = [c for c in redfish.storage() if _is_raid_controller(c)]
+        except BMCError as exc:
+            log(f"waiting for the RAID controller: {exc}", level="warning")
+            continue
+        if controllers and all((c.get("state") or "Enabled") != "Disabled" for c in controllers):
+            log(f"RAID controller is up ({controllers[0]['name']})")
+            return
+    log("the RAID controller has not reported ready; trying anyway", level="warning")
+
+
+def _until_ready(fn: Callable[[], dict], *, log: LogSink, what: str) -> dict:
+    """Run a CIMC storage write, retrying while it says the subsystem is not
+    ready (error 2003): the controller is still initialising after power on."""
+    deadline = time.monotonic() + settings.raid_bmc_timeout_seconds
+    while True:
+        try:
+            return fn()
+        except BMCError as exc:
+            text = str(exc).lower()
+            if "not ready" not in text and "error 2003" not in text:
+                raise
+            if time.monotonic() >= deadline:
+                raise BMCError(f"{what}: the storage subsystem never became ready") from exc
+            log(f"{what}: storage subsystem not ready yet; retrying in 10 s", level="warning")
+            time.sleep(10)
+
+
 def configure(server: Server, level: RaidLevel, *, log: LogSink = null_sink) -> dict:
     """Replace whatever the controller holds with one `level` virtual drive."""
     credential = credential_for(server)
@@ -159,6 +212,7 @@ def configure(server: Server, level: RaidLevel, *, log: LogSink = null_sink) -> 
         host=host, credential=credential, port=server.redfish_port,
         system_path=server.redfish_system_path, log=log,
     )
+    ensure_host_on(redfish, log)
 
     def xml_api() -> CimcXmlApi:
         return CimcXmlApi(host, credential, port=server.redfish_port, log=log,
@@ -186,6 +240,7 @@ def clear(server: Server, *, log: LogSink = null_sink) -> dict:
         host=host, credential=credential, port=server.redfish_port,
         system_path=server.redfish_system_path, log=log,
     )
+    ensure_host_on(redfish, log)
     try:
         controllers = [c for c in redfish.storage() if c["volumes"]]
         for controller in controllers:
@@ -201,9 +256,14 @@ def clear(server: Server, *, log: LogSink = null_sink) -> dict:
                     timeout=settings.raid_bmc_timeout_seconds) as api:
         deleted = 0
         for controller in api.storage_controllers():
-            for vd in api.virtual_drives(controller["dn"]):
+            vds = api.virtual_drives(controller["dn"])
+            if any(vd.get("bootDrive") == "true" for vd in vds):
+                _until_ready(lambda c=controller: api.clear_boot_drive(c["dn"]), log=log,
+                             what="clearing the boot drive")
+            for vd in vds:
                 log(f"deleting virtual drive {vd.get('name')} on {controller.get('id')}")
-                api.delete_virtual_drive(vd["dn"])
+                _until_ready(lambda v=vd: api.delete_virtual_drive(v["dn"]), log=log,
+                             what=f"deleting {vd.get('name')}")
                 deleted += 1
     return {"via": "cimc-xml", "deleted": deleted, "description": "every virtual drive deleted"}
 
@@ -366,11 +426,12 @@ def _configure_xml(api: CimcXmlApi, level: RaidLevel, log: LogSink) -> dict:
         # "The Virtual Drive 0 is an OS Drive. This virtual drive cannot be
         # deleted" until the controller's boot drive is cleared.
         log("clearing the controller's boot drive so the virtual drive can be deleted")
-        api.clear_boot_drive(dn)
+        _until_ready(lambda: api.clear_boot_drive(dn), log=log, what="clearing the boot drive")
     for vd in existing:
         log(f"deleting virtual drive {vd.get('name')}")
         try:
-            api.delete_virtual_drive(vd["dn"])
+            _until_ready(lambda v=vd: api.delete_virtual_drive(v["dn"]), log=log,
+                         what=f"deleting {vd.get('name')}")
         except BMCError as exc:
             if "timed out" not in str(exc).lower():
                 raise
@@ -402,7 +463,8 @@ def _configure_xml(api: CimcXmlApi, level: RaidLevel, log: LogSink) -> dict:
     # clears it.
     if any("foreign" in (d.get("pdStatus") or "").lower() for d in raw_disks):
         log("disks carry a foreign configuration; clearing it on the controller")
-        api.clear_foreign_config(dn)
+        _until_ready(lambda: api.clear_foreign_config(dn), log=log,
+                     what="clearing the foreign configuration")
         raw_disks = list_disks()
     disks = []
     for d in raw_disks:
@@ -426,7 +488,8 @@ def _configure_xml(api: CimcXmlApi, level: RaidLevel, log: LogSink) -> dict:
     for d in members:
         if "jbod" in str(d["state"]).lower():
             log(f"{d['name']}: JBOD -> unconfigured good")
-            api.make_unconfigured_good(d["dn"])
+            _until_ready(lambda disk=d: api.make_unconfigured_good(disk["dn"]), log=log,
+                         what=f"{d['name']} to unconfigured good")
 
     capacity = usable_capacity(level, [d["capacity_bytes"] for d in members])
     if capacity is None:
@@ -442,10 +505,10 @@ def _configure_xml(api: CimcXmlApi, level: RaidLevel, log: LogSink) -> dict:
         return next((v for v in api.virtual_drives(dn) if v.get("name") == VOLUME_NAME), None)
 
     try:
-        api.create_virtual_drive(
+        _until_ready(lambda: api.create_virtual_drive(
             dn, name=VOLUME_NAME, raid_level=XML_LEVEL[level], drive_groups=groups,
             size=f"{size_mb} MB",
-        )
+        ), log=log, what="creating the virtual drive")
     except BMCError as exc:
         text = str(exc).lower()
         if "timed out" in text:
@@ -466,7 +529,8 @@ def _configure_xml(api: CimcXmlApi, level: RaidLevel, log: LogSink) -> dict:
     if built is None:
         raise BMCError("the CIMC accepted the request but lists no virtual drive afterwards")
     try:
-        api.set_boot_drive(built["dn"])
+        _until_ready(lambda: api.set_boot_drive(built["dn"]), log=log,
+                     what="marking the virtual drive bootable")
     except BMCError as exc:
         log(f"could not mark the virtual drive bootable ({exc})", level="warning")
     return {

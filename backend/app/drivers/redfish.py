@@ -690,6 +690,9 @@ class RedfishDriver(BMCDriver):
                 "id": controller.get("Id"),
                 "name": sc.get("Name") or controller.get("Name") or controller.get("Id"),
                 "model": sc.get("Model"),
+                # "Disabled" while the host is off: the controller is not running.
+                "state": (sc.get("Status") or {}).get("State"),
+                "health": (sc.get("Status") or {}).get("Health"),
                 "raid_types": sc.get("SupportedRAIDTypes") or [],
                 "volumes_path": volumes_path,
                 "drives": drives,
