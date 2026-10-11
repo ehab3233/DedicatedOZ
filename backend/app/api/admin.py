@@ -828,14 +828,23 @@ def fleet_summary(db: Session = Depends(get_db)) -> dict:
     active_jobs = db.execute(
         select(func.count()).select_from(Job).where(Job.state.in_(["queued", "running"]))
     ).scalar_one()
-    failed_recently = db.execute(
-        select(func.count())
-        .select_from(Job)
-        .where(
+    # A failure that a later success of the same kind on the same server
+    # has overtaken is history, not something to count against the day.
+    failed_jobs = db.execute(
+        select(Job).where(
             Job.state == "failed",
             Job.finished_at >= datetime.now(UTC) - timedelta(days=1),
         )
-    ).scalar_one()
+    ).scalars().all()
+    failed_recently = sum(
+        1 for job in failed_jobs
+        if db.execute(
+            select(func.count()).select_from(Job).where(
+                Job.server_id == job.server_id, Job.type == job.type,
+                Job.state == "succeeded", Job.created_at > job.created_at,
+            )
+        ).scalar_one() == 0
+    )
     unhealthy = db.execute(
         select(func.count())
         .select_from(Server)

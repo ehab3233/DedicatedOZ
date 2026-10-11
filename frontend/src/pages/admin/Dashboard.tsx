@@ -111,9 +111,25 @@ export default function Dashboard() {
   )
 }
 
+/** An empty bay as the M4's Redfish describes one: not a drive, so not a failure. */
+function isRealDrive(d: Record<string, unknown>): boolean {
+  const blank = (v: unknown) => v == null || ['', 'na', 'n/a', 'none', 'unknown'].includes(String(v).trim().toLowerCase())
+  if (String(d.state ?? '').toLowerCase() === 'absent') return false
+  return !(blank(d.model) && blank(d.serial) && !d.capacity_gb)
+}
+
+/** A failure that a later success of the same kind on the same server has overtaken is history, not news. */
+function overtaken(failed: Job, jobs: Job[]): boolean {
+  const when = new Date(failed.created_at).getTime()
+  return jobs.some((j) => j.server_id === failed.server_id && j.type === failed.type && j.state === 'succeeded' && new Date(j.created_at).getTime() > when)
+}
+
 function buildAttention(servers: AdminServer[], jobs: Job[]) {
   const items: Array<{ icon: React.ReactNode; text: string; to: string; link: string }> = []
   for (const s of servers) {
+    // The management server is read, not provisioned: its health matters,
+    // its PXE MAC, firmware baseline and BMC preparation do not.
+    const provisioned = s.role !== 'management' && s.state !== 'retired'
     if (s.health_status === 'critical' || s.health_status === 'warning') {
       items.push({
         icon: <AlertTriangle style={{ color: s.health_status === 'critical' ? 'var(--crit)' : 'var(--warn)' }} />,
@@ -121,23 +137,23 @@ function buildAttention(servers: AdminServer[], jobs: Job[]) {
         to: `/admin/servers/${s.id}/hardware`, link: 'Hardware',
       })
     }
-    if (!s.provisioning_mac && s.state !== 'retired') {
+    if (!s.provisioning_mac && provisioned) {
       items.push({ icon: <Server style={{ color: 'var(--warn)' }} />, text: `${s.serial}: no PXE MAC, so reinstalls will refuse`, to: `/admin/servers/${s.id}/hardware`, link: 'Pick a NIC' })
     }
-    if (firmwareBelowTarget(s.cimc_firmware)) {
+    if (provisioned && firmwareBelowTarget(s.cimc_firmware)) {
       items.push({ icon: <Cpu style={{ color: 'var(--text-3)' }} />, text: `${s.serial}: CIMC ${s.cimc_firmware}, below the ${TARGET_FIRMWARE} baseline`, to: `/admin/servers/${s.id}/bmc`, link: 'BMC' })
     }
-    if (!s.bmc_prepared_at && s.state !== 'retired') {
+    if (!s.bmc_prepared_at && provisioned) {
       items.push({ icon: <Wrench style={{ color: 'var(--warn)' }} />, text: `${s.serial}: BMC never prepared, so IPMI over LAN, SOL and KVM may still be off`, to: `/admin/servers/${s.id}/bmc`, link: 'Prepare' })
     }
-    const drives = (s.drives as Array<Record<string, unknown>>).filter((d) => d.failure_predicted)
+    const drives = (s.drives as Array<Record<string, unknown>>).filter((d) => isRealDrive(d) && d.failure_predicted)
     if (drives.length) {
       items.push({ icon: <HardDrive style={{ color: 'var(--crit)' }} />, text: `${s.serial}: ${drives.length} drive${drives.length > 1 ? 's' : ''} predicting failure`, to: `/admin/servers/${s.id}/hardware`, link: 'Drives' })
     }
   }
   const dayAgo = Date.now() - 86400_000
   for (const j of jobs) {
-    if (j.state === 'failed' && new Date(j.finished_at ?? j.created_at).getTime() > dayAgo) {
+    if (j.state === 'failed' && new Date(j.finished_at ?? j.created_at).getTime() > dayAgo && !overtaken(j, jobs)) {
       const serial = servers.find((s) => s.id === j.server_id)?.serial
       items.push({ icon: <XCircle style={{ color: 'var(--crit)' }} />, text: `${label(j.type)} failed${serial ? ` on ${serial}` : ''}: ${j.error ?? ''}`.slice(0, 160), to: `/jobs/${j.id}`, link: 'Log' })
     }
