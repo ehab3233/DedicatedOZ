@@ -448,6 +448,59 @@ class CimcXmlApi:
             raise BMCError("aaaGetComputeAuthTokens returned no tokens")
         return tokens[0], tokens[1]
 
+    # -- local users ------------------------------------------------------
+    #
+    # The CIMC has a fixed set of user slots (sys/user-ext/user-1 .. 15);
+    # slot 1 is the built-in admin. A slot is "free" when inactive or
+    # unnamed. These are what customer KVM access hands out: a "user"
+    # account (power, KVM, virtual media; no BMC settings) that exists for
+    # the length of one grant.
+
+    def list_users(self) -> list[dict[str, str]]:
+        return sorted(self.resolve_class("aaaUser"), key=lambda u: int(u.get("id") or 0))
+
+    def create_user(self, name: str, password: str, *, priv: str = "user") -> dict[str, str]:
+        """Put `name` in the first free slot. Raises BMCError when none is free."""
+        if priv not in {"admin", "user", "read-only"}:
+            raise ValueError("priv must be admin, user or read-only")
+        for user in self.list_users():
+            if user.get("name") == name:
+                raise BMCError(f"CIMC user {name} already exists in slot {user.get('id')}")
+        for user in self.list_users():
+            if user.get("id") == "1":
+                continue
+            if (user.get("accountStatus") or "").lower() != "active" or not user.get("name"):
+                self._log(f"creating CIMC user {name} ({priv}) in slot {user.get('id')}")
+                return self.configure(
+                    user["dn"], "aaaUser", name=name, pwd=password, priv=priv,
+                    accountStatus="active",
+                )
+        raise BMCError("no free user slot on the CIMC (all 15 are active)")
+
+    def set_user_password(self, name: str, password: str) -> dict[str, str]:
+        user = self._user_named(name)
+        return self.configure(user["dn"], "aaaUser", pwd=password)
+
+    def remove_user(self, name: str) -> bool:
+        """Free the slot `name` holds. False when there is no such user."""
+        try:
+            user = self._user_named(name)
+        except BMCError:
+            return False
+        try:
+            self.configure(user["dn"], "aaaUser", accountStatus="inactive", name="", pwd="")
+        except BMCError:
+            # Some builds refuse to blank the name; inactive is what matters.
+            self.configure(user["dn"], "aaaUser", accountStatus="inactive")
+        self._log(f"removed CIMC user {name} from slot {user.get('id')}")
+        return True
+
+    def _user_named(self, name: str) -> dict[str, str]:
+        for user in self.list_users():
+            if user.get("name") == name:
+                return user
+        raise BMCError(f"no CIMC user named {name}")
+
     # -- utilisation -----------------------------------------------------
 
     def server_utilization(self) -> dict[str, int | None] | None:
@@ -587,6 +640,6 @@ def _redact_xml(text: str) -> str:
     import re
 
     text = re.sub(
-        r'(inPassword|outCookie|cookie|inCookie|outTokens|key)="[^"]*"', r'\1="***"', text
+        r'(inPassword|outCookie|cookie|inCookie|outTokens|key|pwd)="[^"]*"', r'\1="***"', text
     )
     return text

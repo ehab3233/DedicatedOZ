@@ -52,6 +52,28 @@ def create_access_token(customer_id: uuid.UUID, is_admin: bool) -> tuple[str, in
     return token, expires_in
 
 
+def create_kvm_ticket(customer_id: uuid.UUID, hours: int) -> str:
+    """What the browser carries to the KVM proxy: who it is, until when."""
+    now = datetime.now(UTC)
+    payload = {
+        "sub": str(customer_id),
+        "iat": int(now.timestamp()),
+        "exp": int((now + timedelta(hours=hours)).timestamp()),
+        "typ": "kvm",
+    }
+    return jwt.encode(payload, settings.jwt_secret, algorithm=settings.jwt_algorithm)
+
+
+def decode_kvm_ticket(token: str) -> dict:
+    payload = jwt.decode(
+        token, settings.jwt_secret, algorithms=[settings.jwt_algorithm],
+        options={"require": ["exp", "sub"]},
+    )
+    if payload.get("typ") != "kvm":
+        raise jwt.InvalidTokenError("not a KVM ticket")
+    return payload
+
+
 def decode_access_token(token: str) -> dict:
     return jwt.decode(
         token,

@@ -100,6 +100,31 @@ class APIToken(Base, TimestampMixin):
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class KvmGrant(Base, TimestampMixin):
+    """A customer's window onto a server's graphical console.
+
+    While it is open, a temporary CIMC user exists for it and nginx lets a
+    browser holding the customer's ticket through to the CIMC at
+    `<label>.<portal domain>`. `cleaned_at` is when the CIMC user was removed.
+    """
+
+    __tablename__ = "kvm_grants"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    server_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("servers.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    customer_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("customers.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    label: Mapped[str] = mapped_column(String(32), unique=True, nullable=False, index=True)
+    cimc_username: Mapped[str] = mapped_column(String(32), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cleaned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class SSHKey(Base, TimestampMixin):
     __tablename__ = "ssh_keys"
 

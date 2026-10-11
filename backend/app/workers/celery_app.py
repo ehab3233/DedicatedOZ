@@ -52,6 +52,10 @@ celery_app.conf.update(
             "schedule": crontab(minute="*/5"),
         },
         # Catches jobs the API committed but could not hand to the broker.
+        "kvm-expire": {
+            "task": "doz.poll.kvm_expire",
+            "schedule": crontab(minute="*/10"),
+        },
         "sensors-all": {
             "task": "doz.poll.sensors_all",
             "schedule": settings.sensors_poll_interval_seconds,

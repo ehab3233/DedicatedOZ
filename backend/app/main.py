@@ -18,6 +18,7 @@ from app.api import (
     boot,
     console,
     jobs,
+    kvm,
     os_templates,
     servers,
     ssh_keys,
@@ -59,6 +60,7 @@ app.include_router(admin_accounts.router)
 app.include_router(admin_bmc.router)
 app.include_router(admin_images.router)
 app.include_router(boot.router)
+app.include_router(kvm.router)
 
 
 @app.exception_handler(ValueError)

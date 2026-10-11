@@ -153,6 +153,13 @@ class Settings(BaseSettings):
     sensors_poll_interval_seconds: int = 60
     sensors_cache_ttl_seconds: int = 600
 
+    # --- customer KVM ---------------------------------------------------------
+    # The portal's domain. With it set, a customer can open a server's
+    # graphical console at kvm-<label>.<domain>, which nginx proxies to the
+    # CIMC for a browser holding that customer's ticket. Empty = off.
+    portal_domain: str = ""
+    kvm_grant_hours: int = 4
+
     # --- email ---------------------------------------------------------------
     # Customers are mailed when a reinstall, rescue boot or wipe finishes.
     # Empty host = nothing is sent.

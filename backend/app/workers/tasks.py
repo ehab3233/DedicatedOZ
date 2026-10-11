@@ -1223,6 +1223,17 @@ def dispatch(job: Job) -> str:
     return async_result.id
 
 
+@celery_app.task(name="doz.poll.kvm_expire", max_retries=0)
+def kvm_expire_task() -> dict:
+    """Remove the CIMC users of customer console grants that have run out."""
+    from app.services import kvm_access
+
+    with session_scope() as db:
+        cleaned = kvm_access.expire_due(db)
+        db.commit()
+    return {"cleaned": cleaned}
+
+
 @celery_app.task(name="doz.poll.sensors_all", max_retries=0)
 def sensors_all_task() -> dict:
     """Read every server's sensors into the shared cache, so the panel shows

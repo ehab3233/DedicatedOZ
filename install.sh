@@ -17,6 +17,8 @@
 #                              none (default) | proxy DHCP | DOZ_DHCP_RANGE=A,B |
 #                              external: your DHCP server points PXE clients at this VM
 #   DOZ_ADMIN_EMAIL=you@x      admin login (default: admin@example.com)
+#   DOZ_DOMAIN=portal.example.com   portal domain: HTTPS and customer KVM
+#   DOZ_CLOUDFLARE_TOKEN=...   Cloudflare API token (DNS edit) for the certificate
 #   DOZ_SIM=0                  do not start the BMC simulator
 #   DOZ_BRANCH=<name>          which branch to install (default: the repository's default)
 #   DOZ_REPO=<url or path>     where to get the code
@@ -58,6 +60,8 @@ else
 fi
 
 ARGS=(--src "$SRC" --admin-email "${DOZ_ADMIN_EMAIL:-admin@example.com}")
+[ -n "${DOZ_DOMAIN:-}" ] && ARGS+=(--domain "$DOZ_DOMAIN")
+[ -n "${DOZ_CLOUDFLARE_TOKEN:-}" ] && ARGS+=(--cloudflare-token "$DOZ_CLOUDFLARE_TOKEN")
 [ -n "${DOZ_IP:-}" ] && ARGS+=(--ip "$DOZ_IP")
 case "$PXE" in
     none)  ARGS+=(--no-pxe) ;;

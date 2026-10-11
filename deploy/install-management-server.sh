@@ -27,6 +27,10 @@
 #                  this VM; this VM only serves TFTP and the boot scripts
 #   --proxy-dhcp   your router keeps doing DHCP; this only adds the PXE options
 #   --no-pxe       no DHCP/TFTP at all: panel, power and console only (add PXE later)
+#   --domain D     the portal's hostname: HTTPS for the portal and customer KVM at
+#                  kvm-<label>.D (needs A records for D and *.D pointing here)
+#   --cloudflare-token T  Cloudflare API token (Zone.DNS edit) for the wildcard
+#                  certificate; omitted, an existing /etc/letsencrypt cert is used
 #
 # Update: pull the new code and run it again with no arguments. The settings
 # from the first run are kept in /etc/doz/install.conf; secrets in
@@ -43,6 +47,8 @@ IFACE=""
 PXE_MODE=""          # authoritative | proxy | none
 DHCP_RANGE=""
 ADMIN_EMAIL=""
+DOMAIN=""            # portal hostname; with it, HTTPS and customer KVM
+CLOUDFLARE_TOKEN=""  # Cloudflare API token for the wildcard certificate
 FETCH_IMAGES=0
 WITH_DOCKER=0
 
@@ -63,6 +69,8 @@ while [ $# -gt 0 ]; do
         --no-pxe)       PXE_MODE=none; DHCP_RANGE=""; shift ;;
         --external-dhcp) PXE_MODE=external; DHCP_RANGE=""; shift ;;
         --admin-email)  ADMIN_EMAIL="$2"; shift 2 ;;
+        --domain)       DOMAIN="$2"; shift 2 ;;
+        --cloudflare-token) CLOUDFLARE_TOKEN="$2"; shift 2 ;;
         --fetch-images) FETCH_IMAGES=1; shift ;;
         --with-docker)  WITH_DOCKER=1; shift ;;
         --src)          SRC_DIR="$2"; shift 2 ;;
@@ -143,6 +151,7 @@ IFACE=$IFACE
 PXE_MODE=$PXE_MODE
 DHCP_RANGE=$DHCP_RANGE
 ADMIN_EMAIL=$ADMIN_EMAIL
+DOMAIN=$DOMAIN
 EOF
 
 # ---------------------------------------------------------------------------
@@ -308,7 +317,12 @@ DOZ_BOOT_PIN_CLIENT_IP=${PIN}
 
 # nginx is in front of the API and sets X-Forwarded-For.
 DOZ_TRUST_PROXY_HEADERS=true
-DOZ_CORS_ORIGINS=http://${MGMT_IP}
+DOZ_CORS_ORIGINS=http://${MGMT_IP}${DOMAIN:+,https://$DOMAIN}
+# The portal's domain: HTTPS for the portal, and the customer graphical
+# console at kvm-<label>.<domain>, proxied by nginx to the server's CIMC.
+DOZ_PORTAL_DOMAIN=${DOMAIN}
+DOZ_PORTAL_URL=${DOMAIN:+https://$DOMAIN}
+DOZ_KVM_GRANT_HOURS=4
 
 DOZ_INSTALLER_TEMPLATE_DIR=${INSTALL_DIR}/installer/templates
 # What nginx serves at http://${MGMT_IP}:8080/: ramdisk, kernels, initrds, ISOs.
@@ -491,6 +505,44 @@ note "doz.service enabled at boot, with:$WANTS"
 # nginx
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Certificate for the portal's domain and kvm-*.<domain> (Let's Encrypt,
+# DNS validation through Cloudflare, so the wildcard is covered).
+# ---------------------------------------------------------------------------
+
+CERT_DIR=""
+if [ -n "$DOMAIN" ]; then
+    say "certificate for $DOMAIN and *.$DOMAIN"
+    apt-get install -y -qq --no-install-recommends certbot python3-certbot-dns-cloudflare >/dev/null
+    if [ -n "$CLOUDFLARE_TOKEN" ]; then
+        umask 077
+        printf 'dns_cloudflare_api_token = %s\n' "$CLOUDFLARE_TOKEN" > /etc/doz/cloudflare.ini
+        umask 022
+    fi
+    if [ -f "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" ]; then
+        note "certificate present; certbot's timer renews it"
+        CERT_DIR="/etc/letsencrypt/live/$DOMAIN"
+    elif [ -f /etc/doz/cloudflare.ini ]; then
+        if certbot certonly --dns-cloudflare --dns-cloudflare-credentials /etc/doz/cloudflare.ini \
+                --dns-cloudflare-propagation-seconds 30 -d "$DOMAIN" -d "*.$DOMAIN" \
+                --non-interactive --agree-tos -m "$ADMIN_EMAIL" >/tmp/certbot.log 2>&1; then
+            CERT_DIR="/etc/letsencrypt/live/$DOMAIN"
+            note "issued; certbot's timer renews it"
+        else
+            note "certbot failed (see /tmp/certbot.log); the portal stays on HTTP at $MGMT_IP"
+            FAILED="$FAILED certificate"
+        fi
+    else
+        note "no Cloudflare token (--cloudflare-token) and no certificate yet: HTTP only for now"
+    fi
+    mkdir -p /etc/letsencrypt/renewal-hooks/deploy
+    cat > /etc/letsencrypt/renewal-hooks/deploy/doz-nginx.sh <<'HOOK'
+#!/bin/sh
+systemctl reload nginx
+HOOK
+    chmod 755 /etc/letsencrypt/renewal-hooks/deploy/doz-nginx.sh
+fi
+
 say "nginx"
 cat > /etc/nginx/sites-available/doz <<NGINX
 # DedicatedOZ portal + API on :80, boot assets on :8080.
@@ -542,6 +594,105 @@ server {
         proxy_buffering    off;
     }
 }
+
+$( if [ -n "$CERT_DIR" ]; then
+DOMAIN_RE="$(printf '%s' "$DOMAIN" | sed 's/\./\\./g')"
+cat <<TLS
+# The portal on its domain, over TLS. Plain HTTP on the name redirects; the
+# address stays on plain HTTP above because the netboot rail needs it.
+server {
+    listen 80;
+    server_name $DOMAIN;
+    return 301 https://\$host\$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name $DOMAIN;
+    ssl_certificate     $CERT_DIR/fullchain.pem;
+    ssl_certificate_key $CERT_DIR/privkey.pem;
+    root $INSTALL_DIR/frontend/dist;
+    index index.html;
+    client_max_body_size 16m;
+    location / {
+        try_files \$uri /index.html;
+    }
+    location = /api/v1/admin/images/upload {
+        client_max_body_size 0;
+        proxy_request_buffering off;
+        proxy_pass         http://127.0.0.1:8000;
+        proxy_http_version 1.1;
+        proxy_set_header   Host              \$host;
+        proxy_set_header   X-Real-IP         \$remote_addr;
+        proxy_set_header   X-Forwarded-For   \$proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto \$scheme;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+    location ~ ^/(api|boot|health|docs|openapi\.json|redoc) {
+        proxy_pass         http://127.0.0.1:8000;
+        proxy_http_version 1.1;
+        proxy_set_header   Host              \$host;
+        proxy_set_header   X-Real-IP         \$remote_addr;
+        proxy_set_header   X-Forwarded-For   \$proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto \$scheme;
+        proxy_set_header   Upgrade           \$http_upgrade;
+        proxy_set_header   Connection        \$connection_upgrade;
+        proxy_read_timeout 3600s;
+        proxy_buffering    off;
+    }
+}
+
+# Customer graphical console: kvm-<label>.$DOMAIN is one server's CIMC, for
+# a browser the API says may see it. nginx asks the API on every request
+# (auth_request) and proxies to the CIMC the answer names, websockets and
+# all, so the CIMC's own viewer runs unchanged.
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name ~^kvm-[a-z0-9]+\\.${DOMAIN_RE}\$;
+    ssl_certificate     $CERT_DIR/fullchain.pem;
+    ssl_certificate_key $CERT_DIR/privkey.pem;
+
+    location = /__doz_kvm_auth {
+        internal;
+        proxy_pass               http://127.0.0.1:8000/api/v1/kvm/authorize;
+        proxy_pass_request_body  off;
+        proxy_set_header         Content-Length "";
+        proxy_set_header         X-KVM-Host \$host;
+        proxy_set_header         Cookie \$http_cookie;
+    }
+
+    location / {
+        auth_request      /__doz_kvm_auth;
+        auth_request_set  \$kvm_upstream      \$upstream_http_x_upstream;
+        auth_request_set  \$kvm_upstream_host \$upstream_http_x_upstream_host;
+        error_page 401 = @no_access;
+
+        proxy_pass              \$kvm_upstream;
+        proxy_ssl_verify        off;
+        proxy_ssl_server_name   off;
+        proxy_http_version      1.1;
+        proxy_set_header        Host              \$kvm_upstream_host;
+        proxy_set_header        Upgrade           \$http_upgrade;
+        proxy_set_header        Connection        \$connection_upgrade;
+        proxy_set_header        X-Forwarded-For   \$proxy_add_x_forwarded_for;
+        proxy_redirect          ~^https?://[^/]+(/.*)\$ https://\$host\$1;
+        proxy_cookie_domain     ~.* \$host;
+        proxy_read_timeout      3600s;
+        proxy_send_timeout      3600s;
+        proxy_buffering         off;
+        client_max_body_size    0;
+    }
+
+    location @no_access {
+        default_type text/plain;
+        return 401 "No console access for this address. Open it from the portal's Console tab.\n";
+    }
+}
+TLS
+fi )
 
 # Boot assets: kernels, initrds, and the ISO image store under /iso/. Plain
 # HTTP, no redirects -- the CIMC's virtual media cannot follow one and cannot
@@ -745,7 +896,7 @@ cat <<SUMMARY
  DedicatedOZ is installed and running as the 'doz' service.
 =======================================================================
 
- Portal:        http://${MGMT_IP}
+ Portal:        http://${MGMT_IP}${CERT_DIR:+  and https://$DOMAIN}
  API docs:      http://${MGMT_IP}/docs
  Boot assets:   http://${MGMT_IP}:8080
  Admin login:   ${ADMIN_EMAIL}

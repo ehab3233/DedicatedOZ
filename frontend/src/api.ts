@@ -324,6 +324,24 @@ export interface Plan {
   started_at: string
 }
 
+/** A customer's window onto a server's graphical console. */
+export interface KvmGrant {
+  url: string
+  hostname: string
+  username: string
+  /** Shown once, when the grant is opened or renewed; never stored. */
+  password: string | null
+  expires_at: string
+  created_at: string | null
+  hours: number
+}
+
+export interface KvmStatus {
+  available: boolean
+  grant: KvmGrant | null
+  reason: string | null
+}
+
 /** The worker's last sensor report, as the portal sees it. */
 export interface CustomerSensorReport {
   sensors: Sensor[]
@@ -355,6 +373,9 @@ export const api = {
   revokeToken: (id: string) => request<void>(`/api/v1/auth/tokens/${id}`, { method: 'DELETE' }),
   jobs: (limit = 20) => request<Job[]>(`/api/v1/jobs?limit=${limit}`),
   serverSensors: (id: string) => request<CustomerSensorReport>(`/api/v1/servers/${id}/sensors`),
+  kvmStatus: (id: string) => request<KvmStatus>(`/api/v1/servers/${id}/kvm`),
+  openKvm: (id: string) => request<KvmGrant>(`/api/v1/servers/${id}/kvm`, { method: 'POST' }),
+  closeKvm: (id: string) => request<void>(`/api/v1/servers/${id}/kvm`, { method: 'DELETE' }),
 
   servers: () => request<Server[]>('/api/v1/servers'),
   server: (id: string) => request<ServerDetail>(`/api/v1/servers/${id}`),

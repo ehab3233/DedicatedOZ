@@ -440,6 +440,46 @@ built-in simulator, so those readings are simulated; the VM's own services
 are on the Dashboard. The role is on the Edit form, so any server can be
 marked the same way.
 
+## 7b. HTTPS and the customers' graphical console
+
+The portal can run on a domain over HTTPS, which also makes the CIMC's
+graphical console available to customers. Create two DNS records pointing
+at the management server, `portal.example.com` and `*.portal.example.com`,
+make a Cloudflare API token with permission to edit that zone's DNS, and
+run the installer with them (on an existing install, the same flags on
+`sudo /opt/doz-src/doz.sh update`):
+
+```sh
+DOZ_DOMAIN=portal.example.com DOZ_CLOUDFLARE_TOKEN=... \
+  curl -fsSL https://raw.githubusercontent.com/ehab3233/DedicatedOZ/HEAD/install.sh | sudo bash
+```
+
+The installer gets a Let's Encrypt certificate for the domain and the
+wildcard through Cloudflare's DNS, renews it on certbot's timer, serves the
+portal on `https://portal.example.com` (plain HTTP on the name redirects;
+the address stays on plain HTTP because the netboot rail needs it), and sets
+`DOZ_PORTAL_DOMAIN` and `DOZ_PORTAL_URL` for the API.
+
+**How a customer opens the graphical console.** On the server's Console
+tab, **Open the graphical console** creates a temporary user on that
+server's CIMC (role *user*: power, console and virtual media; no BMC
+settings) and a hostname `kvm-<label>.portal.example.com` that nginx
+proxies to that CIMC for the customer's browser only. The browser carries a
+signed ticket cookie the portal sets on its domain; nginx asks the API about
+it on every request and proxies the CIMC's own viewer, websockets included,
+so nothing about the viewer changes. The customer logs in on the CIMC page
+with the one-time username and password the portal shows, then uses its
+own **Launch KVM → HTML based**. The grant lasts `DOZ_KVM_GRANT_HOURS` (4);
+when it runs out, or the customer ends it, the CIMC user is removed and the
+hostname stops answering. Every grant and removal is in the audit log, with
+the CIMC username.
+
+What this does not do: it never shows a customer the CIMC's admin login,
+never reaches a CIMC without a live grant, and does not let two customers'
+grants see each other's servers (the hostname is per grant and tied to the
+customer who holds it). The management server must be able to reach the
+CIMC VLAN on TCP 443 and 2068, which it already needs for the admin KVM.
+
 ## 8. Create a customer and hand them the server
 
 **Manage → Customers → New customer.** Give them an email and generate a
