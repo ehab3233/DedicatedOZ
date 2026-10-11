@@ -15,7 +15,7 @@ export default function Servers() {
 
   return (
     <main className="page">
-      <PageHeader title="Your servers" sub="Every action is queued as a job; nothing blocks, and everything is logged." />
+      <PageHeader title="Your servers" sub="Power, reinstall, rescue, console and network for each server. Every action is queued as a job you can follow." />
 
       {error && <Banner kind="error">{error}</Banner>}
 
@@ -27,24 +27,26 @@ export default function Servers() {
         ) : (
           <div className="table-scroll">
             <table>
-              <thead><tr><th>Server</th><th>Hardware</th><th>State</th><th>Power</th><th>Health</th></tr></thead>
+              <thead><tr><th>Server</th><th>Hardware</th><th>Address</th><th>State</th><th>Power</th><th>Health</th><th className="actions" /></tr></thead>
               <tbody>
                 {data.map((server) => (
                   <tr key={server.id}>
                     <td>
                       <Link to={`/servers/${server.id}`}><strong>{server.hostname ?? server.serial}</strong></Link>
-                      <div className="cell-sub mono">{server.serial}</div>
+                      <div className="cell-sub mono">{server.serial}{server.datacenter ? ` · ${server.datacenter}` : ''}</div>
                     </td>
                     <td className="subtle">
                       {server.cpu_count && server.cpu_model ? `${server.cpu_count}× ${server.cpu_model}` : server.model}
                       {server.ram_gb ? ` · ${server.ram_gb} GB` : ''}
                     </td>
+                    <td className="mono">{server.primary_ip ?? <span className="subtle">—</span>}</td>
                     <td><Pill value={server.state} /></td>
                     <td><span className="status-line"><Dot state={server.last_power_state ?? 'unknown'} /><span style={{ textTransform: 'capitalize' }}>{server.last_power_state ?? 'unknown'}</span></span></td>
                     <td>
                       <Pill value={server.health_status} />
                       <div className="cell-sub">{relativeTime(server.health_checked_at, now)}</div>
                     </td>
+                    <td className="actions"><Link className="button sm" to={`/servers/${server.id}`}>Manage</Link></td>
                   </tr>
                 ))}
               </tbody>

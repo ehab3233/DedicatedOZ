@@ -19,6 +19,8 @@ from app.schemas import (
     APITokenOut,
     CustomerOut,
     LoginRequest,
+    PasswordChange,
+    ProfileUpdate,
     TokenResponse,
 )
 from app.security import create_access_token, generate_api_token, hash_password, verify_password
@@ -77,6 +79,69 @@ def login(
 @router.get("/me", response_model=CustomerOut)
 def me(customer: Customer = Depends(current_customer)) -> Customer:
     return customer
+
+
+@router.patch("/me", response_model=CustomerOut)
+def update_me(
+    payload: ProfileUpdate,
+    request: Request,
+    db: Session = Depends(get_db),
+    customer: Customer = Depends(current_customer),
+) -> Customer:
+    """Contact details and the notification switch. Email is the login and
+    the billing key, so it is changed by an admin, not here."""
+    changes = payload.model_dump(exclude_unset=True)
+    for field, value in changes.items():
+        setattr(customer, field, value)
+    db.add(customer)
+    record_audit(
+        db,
+        action="account.updated",
+        actor_type=ActorType.CUSTOMER,
+        actor_id=customer.id,
+        actor_label=customer.email,
+        source_ip=client_ip(request),
+        detail={"fields": sorted(changes)},
+    )
+    db.commit()
+    db.refresh(customer)
+    return customer
+
+
+@router.post("/password", status_code=status.HTTP_204_NO_CONTENT)
+def change_password(
+    payload: PasswordChange,
+    request: Request,
+    db: Session = Depends(get_db),
+    customer: Customer = Depends(current_customer),
+) -> None:
+    """A new password, given the current one. Existing sessions stay valid
+    until they expire; API tokens are separate and untouched."""
+    if not verify_password(payload.current_password, customer.password_hash):
+        record_audit(
+            db,
+            action="account.password_change_refused",
+            actor_type=ActorType.CUSTOMER,
+            actor_id=customer.id,
+            actor_label=customer.email,
+            source_ip=client_ip(request),
+        )
+        db.commit()
+        raise HTTPException(status_code=400, detail="the current password is not right")
+    if payload.new_password == payload.current_password:
+        raise HTTPException(status_code=400,
+                            detail="the new password is the same as the current one")
+    customer.password_hash = hash_password(payload.new_password)
+    db.add(customer)
+    record_audit(
+        db,
+        action="account.password_changed",
+        actor_type=ActorType.CUSTOMER,
+        actor_id=customer.id,
+        actor_label=customer.email,
+        source_ip=client_ip(request),
+    )
+    db.commit()
 
 
 @router.get("/tokens", response_model=list[APITokenOut])

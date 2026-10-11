@@ -84,6 +84,7 @@ export interface Server {
   last_power_state: string | null
   health_status: string | null
   health_checked_at: string | null
+  primary_ip?: string | null
   created_at: string
 }
 
@@ -97,6 +98,7 @@ export interface IPAssignment {
 }
 
 export interface ServerDetail extends Server {
+  plan: Plan | null
   drives: Array<Record<string, unknown>>
   volumes: Array<Record<string, unknown>>
   nics: Array<Record<string, unknown>>
@@ -299,7 +301,36 @@ export interface Me {
   email: string
   company_name: string | null
   contact_name: string | null
+  phone: string | null
   is_admin: boolean
+  /** Mail when a reinstall, rescue boot or wipe on their server finishes. */
+  notify_jobs: boolean
+}
+
+export interface ApiToken {
+  id: string
+  name: string
+  token_prefix: string
+  created_at: string
+  last_used_at: string | null
+  expires_at: string | null
+}
+
+export interface Plan {
+  plan_name: string
+  monthly_price: number | null
+  currency: string
+  bandwidth_quota_tb: number | null
+  started_at: string
+}
+
+/** The worker's last sensor report, as the portal sees it. */
+export interface CustomerSensorReport {
+  sensors: Sensor[]
+  power: { watts: number; minimum: number | null; maximum: number | null; average: number | null; source?: PowerSource } | null
+  utilization: Utilization | null
+  checked_at: string | null
+  via: string | null
 }
 
 // ---------------------------------------------------------------------------
@@ -314,6 +345,16 @@ export const api = {
     ),
 
   me: () => request<Me>('/api/v1/auth/me'),
+  updateProfile: (body: { company_name?: string | null; contact_name?: string | null; phone?: string | null; notify_jobs?: boolean }) =>
+    request<Me>('/api/v1/auth/me', { method: 'PATCH', body: JSON.stringify(body) }),
+  changePassword: (current_password: string, new_password: string) =>
+    request<void>('/api/v1/auth/password', { method: 'POST', body: JSON.stringify({ current_password, new_password }) }),
+  tokens: () => request<ApiToken[]>('/api/v1/auth/tokens'),
+  createToken: (name: string, expires_in_days: number | null) =>
+    request<ApiToken & { token: string }>('/api/v1/auth/tokens', { method: 'POST', body: JSON.stringify({ name, expires_in_days }) }),
+  revokeToken: (id: string) => request<void>(`/api/v1/auth/tokens/${id}`, { method: 'DELETE' }),
+  jobs: (limit = 20) => request<Job[]>(`/api/v1/jobs?limit=${limit}`),
+  serverSensors: (id: string) => request<CustomerSensorReport>(`/api/v1/servers/${id}/sensors`),
 
   servers: () => request<Server[]>('/api/v1/servers'),
   server: (id: string) => request<ServerDetail>(`/api/v1/servers/${id}`),

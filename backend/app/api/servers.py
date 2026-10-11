@@ -16,6 +16,7 @@ from app.schemas import (
     BandwidthSeries,
     IPAssignmentOut,
     JobOut,
+    PlanOut,
     PowerRequest,
     PowerStateOut,
     RDNSUpdate,
@@ -27,6 +28,7 @@ from app.schemas import (
 )
 from app.services import bmc_status, provisioning
 from app.services import jobs as job_service
+from app.services import sensors as sensors_service
 from app.services.audit import record_audit
 from app.services.bandwidth import series_for_server
 from app.services.dispatch import enqueue
@@ -46,13 +48,13 @@ _POWER_JOB_TYPES = {
 def list_servers(
     db: Session = Depends(get_db),
     customer: Customer = Depends(current_customer),
-) -> list[Server]:
+) -> list[ServerOut]:
     """Servers the caller currently subscribes to.
 
     Admins get their own subscriptions here, not the fleet — the fleet lives
     under /api/v1/admin so an admin's portal view is not silently different.
     """
-    return list(
+    servers = list(
         db.execute(
             select(Server)
             .join(Subscription, Subscription.server_id == Server.id)
@@ -65,6 +67,21 @@ def list_servers(
         .scalars()
         .all()
     )
+    primaries = dict(
+        db.execute(
+            select(IPAssignment.server_id, IPAssignment.address).where(
+                IPAssignment.server_id.in_([s.id for s in servers]),
+                IPAssignment.released_at.is_(None),
+                IPAssignment.is_primary.is_(True),
+            )
+        ).all()
+    ) if servers else {}
+    out = []
+    for server in servers:
+        item = ServerOut.model_validate(server)
+        item.primary_ip = str(primaries[server.id]) if server.id in primaries else None
+        out.append(item)
+    return out
 
 
 @router.get("/{server_id}", response_model=ServerDetailOut)
@@ -83,6 +100,19 @@ def get_server(
         for n in spec.get("nics", [])
     ]
     detail.ip_addresses = _ip_assignments(db, server)
+    plan = db.execute(
+        select(Subscription).where(
+            Subscription.server_id == server.id, Subscription.ended_at.is_(None)
+        )
+    ).scalars().first()
+    if plan is not None:
+        detail.plan = PlanOut(
+            plan_name=plan.plan_name,
+            monthly_price=float(plan.monthly_price) if plan.monthly_price is not None else None,
+            currency=plan.currency,
+            bandwidth_quota_tb=plan.bandwidth_quota_tb,
+            started_at=plan.started_at,
+        )
     health_detail = server.health_detail or {}
     detail.health = ServerHealthOut(
         status=server.health_status,
@@ -109,6 +139,24 @@ def _ip_assignments(db: Session, server: Server) -> list[IPAssignmentOut]:
         item.gateway = str(row.block.gateway) if row.block and row.block.gateway else None
         out.append(item)
     return out
+
+
+@router.get("/{server_id}/sensors")
+def sensors(server: Server = Depends(get_owned_server)) -> dict:
+    """The last sensor report the worker kept for this server: temperatures,
+    fans, power draw and the BMC's utilisation figures, with when it was read.
+
+    Customers never trigger a BMC read themselves; the worker refreshes this
+    on its own timer. Nothing kept yet gives an empty report, not an error.
+    """
+    kept = sensors_service.load(server.id)
+    if kept is None:
+        return {"sensors": [], "power": None, "utilization": None, "checked_at": None,
+                "via": None}
+    # The reason a fallback happened names BMC detail; the customer gets the readings.
+    kept.pop("fallback_reason", None)
+    kept.pop("utilization_error", None)
+    return kept
 
 
 # ---------------------------------------------------------------------------

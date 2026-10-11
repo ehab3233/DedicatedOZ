@@ -6,8 +6,10 @@ import Shell from './layout/Shell'
 import JobDetail from './pages/JobDetail'
 import Login from './pages/Login'
 import SSHKeys from './pages/SSHKeys'
-import ServerDetail from './pages/ServerDetail'
 import Servers from './pages/Servers'
+import Account from './pages/portal/Account'
+import PortalDashboard from './pages/portal/Dashboard'
+import PortalServerPage from './pages/portal/server/ServerPage'
 import Audit from './pages/admin/Audit'
 import Customers from './pages/admin/Customers'
 import Dashboard from './pages/admin/Dashboard'
@@ -21,6 +23,7 @@ import { ToastProvider } from './toast'
 // xterm.js is most of the bundle; only the console pages need it.
 const Console = lazy(() => import('./pages/Console'))
 const ConsoleTab = lazy(() => import('./pages/admin/server/ConsoleTab'))
+const PortalConsoleTab = lazy(() => import('./pages/portal/server/ConsoleTab'))
 
 function Loading() {
   return <main className="page subtle">Loading…</main>
@@ -62,7 +65,7 @@ export default function App() {
     navigate('/login')
   }
 
-  const home = me.is_admin ? '/admin' : '/servers'
+  const home = me.is_admin ? '/admin' : '/dashboard'
 
   return (
     <ToastProvider>
@@ -71,10 +74,21 @@ export default function App() {
           <Routes>
             <Route path="/" element={<Navigate to={home} replace />} />
             <Route path="/login" element={<Navigate to={home} replace />} />
+            <Route path="/dashboard" element={<PortalDashboard />} />
             <Route path="/servers" element={<Servers />} />
-            <Route path="/servers/:id" element={<ServerDetail isAdmin={me.is_admin} />} />
+            <Route path="/servers/:id" element={<PortalServerPage />}>
+              <Route
+                path="console"
+                element={
+                  <Suspense fallback={<Loading />}>
+                    <PortalConsoleTab />
+                  </Suspense>
+                }
+              />
+            </Route>
+            <Route path="/servers/:id/:tab" element={<PortalServerPage />} />
             <Route
-              path="/servers/:id/console"
+              path="/servers/:id/console/full"
               element={
                 <Suspense fallback={<Loading />}>
                   <Console isAdmin={me.is_admin} />
@@ -83,6 +97,7 @@ export default function App() {
             />
             <Route path="/jobs/:id" element={<JobDetail isAdmin={me.is_admin} />} />
             <Route path="/ssh-keys" element={<SSHKeys />} />
+            <Route path="/account" element={<Account />} />
             {me.is_admin && (
               <>
                 <Route path="/admin" element={<Dashboard />} />

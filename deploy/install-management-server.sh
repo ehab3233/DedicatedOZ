@@ -315,6 +315,14 @@ DOZ_INSTALLER_TEMPLATE_DIR=${INSTALL_DIR}/installer/templates
 DOZ_BOOT_ASSET_DIR=${INSTALL_DIR}/installer/assets
 # ISO image store, served to BMCs at http://${MGMT_IP}:8080/iso/
 DOZ_IMAGE_DIR=${INSTALL_DIR}/installer/assets/iso
+# Email (optional). With an SMTP host, customers are mailed when a reinstall,
+# rescue boot or wipe on their server finishes. PORTAL_URL is what they open.
+#DOZ_SMTP_HOST=smtp.example.com
+#DOZ_SMTP_PORT=587
+#DOZ_SMTP_USERNAME=
+#DOZ_SMTP_PASSWORD=
+#DOZ_MAIL_FROM=noreply@example.com
+#DOZ_PORTAL_URL=https://portal.example.com
 # Router automation (optional). With a RouterOS 7 REST URL and a user that has
 # the read, write, api and rest-api policies, assigning a server's primary
 # address and every install put its switch port into the block's VLAN and

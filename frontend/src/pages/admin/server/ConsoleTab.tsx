@@ -26,7 +26,7 @@ export default function ConsoleTab() {
 
       {view === 'serial' ? (
         <>
-          <SerialConsole serverId={server.id} popoutTo={`/servers/${server.id}/console`} />
+          <SerialConsole serverId={server.id} popoutTo={`/servers/${server.id}/console/full`} />
           <Card title="Serial console tips" style={{ marginTop: 16 }}>
             <ul style={{ margin: 0, paddingLeft: 18, color: 'var(--text-2)' }}>
               <li>Nothing on screen? Press Enter. A BIOS or GRUB menu redraws on the next keystroke.</li>

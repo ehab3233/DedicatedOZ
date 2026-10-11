@@ -6,7 +6,7 @@ import { PowerControls } from '../power'
 /** The serial console on a page of its own, sized to the window. */
 export default function Console({ isAdmin = false }: { isAdmin?: boolean }) {
   const { id = '' } = useParams()
-  const back = isAdmin ? `/admin/servers/${id}` : `/servers/${id}`
+  const back = isAdmin ? `/admin/servers/${id}/console` : `/servers/${id}/console`
 
   return (
     <main className="page wide">

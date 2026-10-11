@@ -95,7 +95,11 @@ export default function SerialConsole({
     const fit = new FitAddon()
     term.loadAddon(fit)
     term.open(screenRef.current!)
-    fit.fit()
+    try {
+      fit.fit()
+    } catch {
+      /* not laid out yet; the observer below fits it when it is */
+    }
     termRef.current = term
     fitRef.current = fit
 

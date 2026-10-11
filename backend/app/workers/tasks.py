@@ -28,7 +28,7 @@ from app.enums import ActorType, JobState, JobType, PowerAction, RaidLevel, Serv
 from app.models import Image, Job, OSTemplate, Server
 from app.secrets import SecretNotFoundError
 from app.services import boot as boot_service
-from app.services import boot_assets, images, network, raid
+from app.services import boot_assets, images, network, notify, raid
 from app.services import jobs as job_service
 from app.services import sensors as sensors_service
 from app.services.dispatch import enqueue
@@ -80,11 +80,21 @@ def job_runner(job_id: str) -> Iterator[tuple[Session, Job, Server | None] | Non
             # salvage the one that just blew up.
             db.rollback()
             _record_failure(job_uuid, exc)
+            _tell_people(job_uuid)
             raise
         else:
             if JobState(job.state) is JobState.RUNNING:
                 job_service.transition_job(db, job, JobState.SUCCEEDED)
             db.commit()
+    _tell_people(job_uuid)
+
+
+def _tell_people(job_uuid: uuid.UUID) -> None:
+    """Mail the customers who should hear the outcome. Never fails the job."""
+    try:
+        notify.job_finished(job_uuid)
+    except Exception as exc:  # noqa: BLE001 - a mail problem is not a job problem
+        log.warning("could not notify about job %s: %s", job_uuid, exc)
 
 
 def _record_failure(job_uuid: uuid.UUID, exc: BaseException) -> None:

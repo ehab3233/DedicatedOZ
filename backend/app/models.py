@@ -72,6 +72,10 @@ class Customer(Base, TimestampMixin):
     billing_ref: Mapped[str | None] = mapped_column(String(128), index=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    #: Mail when a reinstall, rescue boot or wipe on their server finishes.
+    notify_jobs: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default=text("true"), nullable=False
+    )
 
     subscriptions: Mapped[list[Subscription]] = relationship(back_populates="customer")
     ssh_keys: Mapped[list[SSHKey]] = relationship(

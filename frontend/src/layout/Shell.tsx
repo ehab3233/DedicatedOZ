@@ -11,6 +11,7 @@ import {
   ScrollText,
   Server,
   Sun,
+  UserRound,
   Users,
   X,
 } from 'lucide-react'
@@ -138,9 +139,12 @@ export default function Shell({
             </>
           ) : (
             <>
-              <div className="nav-section">Your account</div>
+              <div className="nav-section">Your servers</div>
+              <NavItem to="/dashboard" icon={<LayoutDashboard />}>Overview</NavItem>
               <NavItem to="/servers" icon={<Server />}>Servers</NavItem>
+              <div className="nav-section">Your account</div>
               <NavItem to="/ssh-keys" icon={<KeyRound />}>SSH keys</NavItem>
+              <NavItem to="/account" icon={<UserRound />}>Account</NavItem>
             </>
           )}
         </nav>

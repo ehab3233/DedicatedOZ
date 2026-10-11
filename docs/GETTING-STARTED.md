@@ -449,6 +449,23 @@ an SSH key under **SSH keys** — or add one for them from their account.
 Server page → **Assign to customer**. Pick them, name the plan, set the price
 you will bill in WHMCS. The server appears in their portal immediately.
 
+**What the customer sees.** Signing in lands on an overview: every server
+with its power state, health and primary address, and the recent activity
+across them. A server opens in tabs: **Overview** (power buttons, live
+temperatures, fan speeds, power draw and utilisation as the hardware reports
+them, hardware, address, plan, health), **Console** (the serial console,
+full-page if they like), **Operating system** (reinstall with their choice of
+OS, hostname, disk layout and keys, behind a typed confirmation; rescue
+mode), **Network** (addresses with reverse DNS they can edit, the server's
+ports), **Traffic** (switch-port counters over a day, a week or a month, and
+usage against the plan's included traffic), and **Activity** (every job with
+its own log). **Account** holds their contact details, password, API tokens
+and the notification switch. With `DOZ_SMTP_HOST`, `DOZ_MAIL_FROM` and
+`DOZ_PORTAL_URL` set in `/etc/doz/doz.env`, they are mailed when a reinstall,
+rescue boot or wipe on their server finishes, with a link to the job log.
+The plan's price is shown to them exactly as you entered it; invoicing is
+still WHMCS's job.
+
 ## 9. The first reinstall
 
 From the server page (or from the customer's own portal): **Reinstall OS** →

@@ -153,6 +153,18 @@ class Settings(BaseSettings):
     sensors_poll_interval_seconds: int = 60
     sensors_cache_ttl_seconds: int = 600
 
+    # --- email ---------------------------------------------------------------
+    # Customers are mailed when a reinstall, rescue boot or wipe finishes.
+    # Empty host = nothing is sent.
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_username: str = ""
+    smtp_password: str = ""
+    smtp_starttls: bool = True
+    mail_from: str = ""
+    # The address customers open the portal at, for links in mail.
+    portal_url: str = ""
+
     # --- router automation (MikroTik RouterOS 7, REST API) ---------------
     # With a URL set, assigning a server's primary address, and every
     # install, program the router: its switch port into the block's VLAN

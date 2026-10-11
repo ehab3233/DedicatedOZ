@@ -35,7 +35,7 @@ gateways, and none of it is a differentiator.
 | BMC setup | **Prepare BMC** runs when a server is added: IPMI over LAN, SOL, BIOS console redirection, virtual media, KVM, Redfish, PXE option ROMs, boot order and NTP over the CIMC XML API. Reads each setting first, so a re-run changes nothing |
 | IPAM | Blocks, assignments, free-pool view, customer-editable rDNS |
 | Health | PSU, fan, temperature and drive pre-fail, polled every 15 minutes |
-| Portal | Servers, power, reinstall, rescue, jobs, bandwidth, SSH keys, console |
+| Portal | Overview of every server, tabbed server page (power, live readings, console, reinstall, rescue, addresses with rDNS, traffic against the plan, activity), SSH keys, account with API tokens, mail when a reinstall or rescue finishes |
 | Admin | Fleet map, lifecycle control, suspend, raw job log viewer, audit trail |
 | API | Customer tokens, same authorisation path as the portal |
 

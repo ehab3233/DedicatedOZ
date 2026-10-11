@@ -51,8 +51,24 @@ class CustomerOut(ORMModel):
     email: str
     company_name: str | None
     contact_name: str | None
+    phone: str | None = None
     is_admin: bool
+    notify_jobs: bool = True
     created_at: datetime
+
+
+class ProfileUpdate(BaseModel):
+    """What a customer may change about their own account."""
+
+    company_name: str | None = Field(default=None, max_length=255)
+    contact_name: str | None = Field(default=None, max_length=255)
+    phone: str | None = Field(default=None, max_length=64)
+    notify_jobs: bool | None = None
+
+
+class PasswordChange(BaseModel):
+    current_password: str = Field(min_length=1, max_length=1024)
+    new_password: str = Field(min_length=12, max_length=1024)
 
 
 class CustomerCreate(BaseModel):
@@ -202,6 +218,17 @@ class ServerOut(ORMModel):
     health_status: str | None
     health_checked_at: datetime | None
     created_at: datetime
+    primary_ip: str | None = None
+
+
+class PlanOut(BaseModel):
+    """The customer's subscription on a server, as the portal shows it."""
+
+    plan_name: str
+    monthly_price: float | None
+    currency: str
+    bandwidth_quota_tb: int | None
+    started_at: datetime
 
 
 class ServerDetailOut(ServerOut):
@@ -210,6 +237,7 @@ class ServerDetailOut(ServerOut):
     nics: list[dict] = Field(default_factory=list)
     ip_addresses: list[IPAssignmentOut] = Field(default_factory=list)
     health: ServerHealthOut | None = None
+    plan: PlanOut | None = None
 
 
 class AdminServerOut(ServerDetailOut):
